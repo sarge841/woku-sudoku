@@ -3,12 +3,18 @@ package com.sarge841.woku
 import kotlin.random.Random
 
 enum class Difficulty(val clues: Int) {
-    EASY(42), MEDIUM(36), HARD(30), EXPERT(26), EXTREME(23)
+    EASY(42), MEDIUM(36), HARD(30), EXPERT(26), EXTREME(23), DIABOLICAL(17)
 }
 
 data class Puzzle(val givens: List<Int>, val solution: List<Int>)
 
 object Sudoku {
+    private val DIABOLICAL_TEMPLATES = listOf(
+        "000000010400000000020000000000050407008000300001090000300400200050100000000806000",
+        "000000012000035000000600070700000300000400800100000000000120000080000040050000600",
+        "000700000100000000000430200000000006000509000000000418000081000002000050040000300"
+    )
+
     fun peers(index: Int): Set<Int> {
         val row = index / 9
         val col = index % 9
@@ -24,6 +30,32 @@ object Sudoku {
         if (values[index] != 0) return emptySet()
         val used = peers(index).map { values[it] }
         return (1..9).filterNot { it in used }.toSet()
+    }
+
+    fun solve(values: List<Int>): List<Int>? {
+        val board = values.toMutableList()
+        if (board.size != 81 || board.any { it !in 0..9 }) return null
+        fun search(): Boolean {
+            var cell = -1
+            var options: Set<Int> = emptySet()
+            for (i in board.indices) if (board[i] == 0) {
+                val choices = candidates(board, i)
+                if (choices.isEmpty()) return false
+                if (cell == -1 || choices.size < options.size) {
+                    cell = i
+                    options = choices
+                    if (choices.size == 1) break
+                }
+            }
+            if (cell == -1) return true
+            for (digit in options) {
+                board[cell] = digit
+                if (search()) return true
+                board[cell] = 0
+            }
+            return false
+        }
+        return if (search()) board else null
     }
 
     fun countSolutions(values: List<Int>, limit: Int = 2): Int {
@@ -65,6 +97,23 @@ object Sudoku {
 
     fun generate(difficulty: Difficulty, seed: Long = Random.nextLong()): Puzzle {
         val random = Random(seed)
+        if (difficulty == Difficulty.DIABOLICAL) {
+            val template = DIABOLICAL_TEMPLATES.random(random).map { it.digitToInt() }
+            val digitMap = (1..9).shuffled(random)
+            val rows = (0..2).shuffled(random).flatMap { band -> (0..2).shuffled(random).map { band * 3 + it } }
+            val cols = (0..2).shuffled(random).flatMap { stack -> (0..2).shuffled(random).map { stack * 3 + it } }
+            val transpose = random.nextBoolean()
+            val givens = List(81) { idx ->
+                val r = idx / 9
+                val c = idx % 9
+                val srcRow = if (transpose) cols[c] else rows[r]
+                val srcCol = if (transpose) rows[r] else cols[c]
+                val v = template[srcRow * 9 + srcCol]
+                if (v == 0) 0 else digitMap[v - 1]
+            }
+            val solution = solve(givens) ?: error("Invalid diabolical template")
+            return Puzzle(givens, solution)
+        }
         repeat(500) {
             val digits = (1..9).shuffled(random)
             val rows = (0..2).shuffled(random).flatMap { band -> (0..2).shuffled(random).map { band * 3 + it } }

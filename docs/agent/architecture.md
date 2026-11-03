@@ -3,7 +3,7 @@
 ## Board and puzzle
 
 - A board is a `List<Int>` of **81 cells**; index `row * 9 + column`, zero-based. `0` is empty; `1..9` are digits. `Puzzle.givens` contains fixed clues; `Puzzle.solution` contains the full answer. Do not mutate a given.
-- `Sudoku.generate(difficulty, seed)` creates a completed valid board, removes clues, and retains each removal only while `countSolutions(board) == 1`. Clue targets are Easy 42, Medium 36, Hard 30, Expert 26, Extreme 23. These levels are clue-count based, **not** rated by solving technique. Preserve uniqueness when changing generation.
+- `Sudoku.generate(difficulty, seed)` creates a completed valid board, removes clues, and retains each removal only while `countSolutions(board) == 1`. Clue targets are Easy 42, Medium 36, Hard 30, Expert 26, Extreme 23, and Diabolical 17 (generated via randomized symmetry/digit permutations of verified 17-clue minimal Sudoku templates). These levels are clue-count based, **not** rated by solving technique. Preserve uniqueness when changing generation.
 - `Sudoku.candidates(values, index)` excludes digits in the same row, column, **and 3×3 box**; a filled cell has no candidates. `fastPencil()` replaces notes on all empty cells with these candidates, and records the entire grid as **one** undo step. It can overwrite manual notes; Undo must restore them.
 
 ## GameState invariants

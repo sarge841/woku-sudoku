@@ -1,0 +1,32 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Inner cell surface -->
+    <path
+        android:fillColor="#1C2228"
+        android:pathData="M27,27h54v54h-54z" />
+    <!-- Highlighted center cell -->
+    <path
+        android:fillColor="#296A5B"
+        android:pathData="M45,45h18v18h-18z" />
+    <!-- Highlighted top-left and bottom-right cells -->
+    <path
+        android:fillColor="#29333A"
+        android:pathData="M27,27h18v18h-18zM63,63h18v18h-18z" />
+    <!-- Grid outer border & inner 3x3 divider lines -->
+    <path
+        android:strokeColor="#75DCC7"
+        android:strokeWidth="3.2"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M27,27h54v54h-54zM45,27v54M63,27v54M27,45h54M27,63h54" />
+    <!-- Accent dots representing clues in the grid -->
+    <path
+        android:fillColor="#E7ECEF"
+        android:pathData="M54,54m-4,0a4,4 0,1 1,8 0a4,4 0,1 1,-8 0" />
+    <path
+        android:fillColor="#75DCC7"
+        android:pathData="M36,36m-3,0a3,3 0,1 1,6 0a3,3 0,1 1,-6 0M72,36m-3,0a3,3 0,1 1,6 0a3,3 0,1 1,-6 0M36,72m-3,0a3,3 0,1 1,6 0a3,3 0,1 1,-6 0M72,72m-3,0a3,3 0,1 1,6 0a3,3 0,1 1,-6 0" />
+</vector>

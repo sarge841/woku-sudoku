@@ -13,4 +13,15 @@ class SudokuTest {
             assertTrue(puzzle.givens.indices.all { puzzle.givens[it] == 0 || puzzle.givens[it] == puzzle.solution[it] })
         }
     }
+
+    @Test fun diabolicalGeneratesDistinctValid17CluePuzzlesAcrossSeeds() {
+        val puzzles = (1L..12L).map { Sudoku.generate(Difficulty.DIABOLICAL, seed = it) }
+        for (p in puzzles) {
+            assertEquals(17, p.givens.count { it != 0 })
+            assertEquals(1, Sudoku.countSolutions(p.givens))
+            assertEquals(1, Sudoku.countSolutions(p.solution))
+            assertTrue(p.givens.indices.all { p.givens[it] == 0 || p.givens[it] == p.solution[it] })
+        }
+        assertTrue(puzzles.map { it.givens }.distinct().size > 1)
+    }
 }
