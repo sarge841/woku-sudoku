@@ -31,8 +31,14 @@ adb devices
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Or transfer the APK to a device running Android 8.0 (API 26) or later and open it to install (allow installs from that source). Debug APKs are for personal testing, not Play Store release. For a distributable release, create and protect your own signing key and configure a release signing profile; never commit keystores or passwords.
+Or transfer the APK to a device running Android 8.0 (API 26) or later and open it to install (allow installs from that source). For the signed, distributable APK, download `woku-sudoku-vX.Y.Z.apk` from [GitHub Releases](https://github.com/sarge841/woku-sudoku/releases) and check it against `SHA256SUMS.txt`. The debug APK uses a different certificate: uninstall an existing debug build before installing a release build (this clears its local data). Future release builds signed with the same key can upgrade in place.
+
+## CI and releases
+
+`.github/workflows/android.yml` runs tests, Android lint, and a debug APK build on pushes to `main`, PRs, and manual dispatch. The debug APK is downloadable from the workflow run. On a version tag (`vX.Y.Z`) it also builds a signed release APK, verifies that the tag matches `versionName`, and automatically publishes that APK and its SHA-256 checksum as a GitHub Release. The release job only runs after tests, lint, and both builds succeed. A failed tag run does not publish a release. Re-running the workflow replaces its release assets.
+
+For the next release, increment `versionCode` (it must increase for Android upgrades) and set `versionName` in `app/build.gradle.kts`, merge to `main`, then push the matching tag. The repository's Actions secrets `WOKU_KEYSTORE_BASE64`, `WOKU_KEYSTORE_PASSWORD`, `WOKU_KEY_ALIAS`, and `WOKU_KEY_PASSWORD` hold release signing credentials. Keep an **offline backup** of the keystore and password: losing them prevents updates to already-installed release APKs. Do not commit either one. A local signed build uses `WOKU_KEYSTORE_PATH`, `WOKU_KEYSTORE_PASSWORD`, `WOKU_KEY_ALIAS`, and `WOKU_KEY_PASSWORD` as environment variables and runs `./gradlew :app:assembleRelease`.
 
 ## Tests
 
-`./gradlew :app:testDebugUnitTest` checks unique puzzle generation, game rules, move history, fast pencil, win/loss, and save restoration. `./gradlew :app:assembleDebug` compiles and packages the Android app. The project uses Gradle 8.10.2, Android Gradle Plugin 8.7.3, Kotlin 2.0.21, and Compose Material 3.
+`./gradlew :app:testDebugUnitTest` checks unique puzzle generation, game rules, move history, fast pencil, win/loss, and save restoration. `./gradlew :app:lintDebug` runs Android lint. `./gradlew :app:assembleDebug` compiles and packages the Android app. The project uses Gradle 8.10.2, Android Gradle Plugin 8.7.3, Kotlin 2.0.21, and Compose Material 3.
