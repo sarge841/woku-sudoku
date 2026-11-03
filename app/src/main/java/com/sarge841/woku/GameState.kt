@@ -20,49 +20,373 @@ data class GameState(
         else -> GameStatus.PLAYING
     }
 
+    fun status(livesEnabled: Boolean): GameStatus = when {
+        livesEnabled && lives == 0 -> GameStatus.LOST
+        values == puzzle.solution -> GameStatus.WON
+        else -> GameStatus.PLAYING
+    }
+
+    fun isDigitComplete(digit: Int): Boolean =
+        digit in 1..9 && (0..80).count { values[it] == digit && puzzle.solution[it] == digit } == 9
+
+    fun nextIncompleteDigit(fromDigit: Int): Int? =
+        (1..9).map { (fromDigit - 1 + it) % 9 + 1 }.firstOrNull { !isDigitComplete(it) }
+
+    val correctCount: Int get() = values.indices.count { values[it] != 0 && values[it] == puzzle.solution[it] }
+
+    val remainingCount: Int get() = 81 - correctCount
+
+    val canFastComplete: Boolean get() = status == GameStatus.PLAYING && remainingCount in 1..9
+
+    fun canFastComplete(livesEnabled: Boolean): Boolean =
+        status(livesEnabled) == GameStatus.PLAYING && remainingCount in 1..9
+
     private fun changed(newValues: List<Int>, newNotes: List<Set<Int>>, newLives: Int = lives): GameState =
         copy(values = newValues, notes = newNotes, lives = newLives,
             history = (history + BoardSnapshot(values, notes)).takeLast(200), future = emptyList())
 
-    fun place(index: Int, digit: Int): GameState {
-        if (status != GameStatus.PLAYING || index !in 0..80 || digit !in 0..9 || puzzle.givens[index] != 0 || values[index] == digit) return this
+    fun place(index: Int, digit: Int, livesEnabled: Boolean = true): GameState {
+        if (status(livesEnabled) != GameStatus.PLAYING || index !in 0..80 || digit !in 0..9 || puzzle.givens[index] != 0 || values[index] == digit) return this
         val newValues = values.toMutableList().also { it[index] = digit }
-        val newNotes = notes.toMutableList().also { it[index] = emptySet() }
-        val life = if (digit != 0 && digit != puzzle.solution[index]) lives - 1 else lives
+        val newNotes = notes.toMutableList().also { list ->
+            list[index] = emptySet()
+            if (digit != 0) {
+                for (peer in Sudoku.peers(index)) {
+                    if (digit in list[peer]) list[peer] = list[peer] - digit
+                }
+            }
+        }
+        val life = if (livesEnabled && digit != 0 && digit != puzzle.solution[index]) (lives - 1).coerceAtLeast(0) else lives
         return changed(newValues, newNotes, life)
     }
 
-    fun toggleNote(index: Int, digit: Int): GameState {
-        if (status != GameStatus.PLAYING || index !in 0..80 || digit !in 1..9 || values[index] != 0) return this
-        val newNotes = notes.toMutableList()
-        newNotes[index] = if (digit in notes[index]) notes[index] - digit else notes[index] + digit
-        return changed(values, newNotes)
+    fun fastComplete(livesEnabled: Boolean = true): GameState {
+        if (!canFastComplete(livesEnabled)) return this
+        return changed(puzzle.solution, List(81) { emptySet() })
     }
 
-    fun fastPencil(): GameState {
-        if (status != GameStatus.PLAYING) return this
+    fun toggleNote(
+        index: Int,
+        digit: Int,
+        livesEnabled: Boolean = true,
+        recordHistory: Boolean = true
+    ): GameState {
+        if (status(livesEnabled) != GameStatus.PLAYING || index !in 0..80 || digit !in 1..9 || values[index] != 0) return this
+        val newNotes = notes.toMutableList()
+        newNotes[index] = if (digit in notes[index]) notes[index] - digit else notes[index] + digit
+        return if (recordHistory) changed(values, newNotes) else copy(notes = newNotes)
+    }
+
+    fun fastPencil(livesEnabled: Boolean = true): GameState {
+        if (status(livesEnabled) != GameStatus.PLAYING) return this
         val updated = values.indices.map { Sudoku.candidates(values, it) }
         return if (updated == notes) this else changed(values, updated)
     }
 
-    fun undo(): GameState {
-        if (status != GameStatus.PLAYING || history.isEmpty()) return this
+    fun undo(livesEnabled: Boolean = true): GameState {
+        if (status(livesEnabled) != GameStatus.PLAYING || history.isEmpty()) return this
         val prior = history.last()
         return copy(values = prior.values, notes = prior.notes, history = history.dropLast(1),
             future = future + BoardSnapshot(values, notes))
     }
 
-    fun redo(): GameState {
-        if (status != GameStatus.PLAYING || future.isEmpty()) return this
+    fun redo(livesEnabled: Boolean = true): GameState {
+        if (status(livesEnabled) != GameStatus.PLAYING || future.isEmpty()) return this
         val next = future.last()
         return copy(values = next.values, notes = next.notes, future = future.dropLast(1),
             history = history + BoardSnapshot(values, notes))
     }
 
-    fun tick(): GameState = if (status == GameStatus.PLAYING) copy(elapsedSeconds = elapsedSeconds + 1) else this
+    fun tick(livesEnabled: Boolean = true): GameState =
+        if (status(livesEnabled) == GameStatus.PLAYING) copy(elapsedSeconds = elapsedSeconds + 1) else this
 
     companion object {
         fun new(puzzle: Puzzle, difficulty: Difficulty): GameState =
             GameState(puzzle, difficulty, puzzle.givens, List(81) { emptySet() })
+    }
+}
+
+data class SelectionState(
+    val selectedCell: Int? = null,
+    val selectedDigit: Int? = null,
+    val pencil: Boolean = false,
+    val viewOnly: Boolean = false
+) {
+    fun onCellTap(
+        game: GameState,
+        index: Int,
+        livesEnabled: Boolean = true,
+        autoAdvanceDigit: Boolean = true
+    ): Pair<GameState, SelectionState> {
+        val placed = game.values.getOrNull(index) ?: 0
+        if (placed != 0) {
+            return game to copy(selectedCell = index, selectedDigit = placed)
+        }
+        val nextSelection = copy(selectedCell = index)
+        if (viewOnly) return game to nextSelection
+        val digit = selectedDigit
+        if (digit == null || game.puzzle.givens.getOrNull(index) != 0) {
+            return game to nextSelection
+        }
+        if (pencil) {
+            return game.toggleNote(index, digit, livesEnabled, recordHistory = true) to nextSelection
+        }
+        val nextGame = game.place(index, digit, livesEnabled)
+        val updatedSelection = if (autoAdvanceDigit && nextGame != game && nextGame.isDigitComplete(digit)) {
+            nextSelection.copy(selectedDigit = nextGame.nextIncompleteDigit(digit))
+        } else {
+            nextSelection
+        }
+        return nextGame to updatedSelection
+    }
+
+    fun onPencilDragCell(
+        game: GameState,
+        index: Int,
+        firstCellInGesture: Boolean,
+        livesEnabled: Boolean = true
+    ): Pair<GameState, SelectionState> {
+        if (!pencil || viewOnly) return game to this
+        val digit = selectedDigit ?: return game to copy(selectedCell = index)
+        if (game.values.getOrNull(index) != 0) return game to this
+        val nextGame = game.toggleNote(index, digit, livesEnabled, recordHistory = firstCellInGesture)
+        return nextGame to copy(selectedCell = index)
+    }
+
+    fun onDigitTap(digit: Int): SelectionState = copy(selectedCell = null, selectedDigit = digit)
+
+    fun onDigitLongPress(digit: Int): SelectionState =
+        if (selectedDigit == digit) copy(selectedDigit = null) else this
+
+    fun togglePencil(): SelectionState =
+        if (pencil) copy(pencil = false) else copy(pencil = true, viewOnly = false)
+
+    fun toggleViewOnly(): SelectionState =
+        if (viewOnly) copy(viewOnly = false) else copy(viewOnly = true, pencil = false)
+}
+
+enum class ColorSlot(val label: String, val defaultArgb: Long, val options: List<Long>) {
+    BACKGROUND("Background", 0xFF111418, listOf(0xFF111418, 0xFF000000, 0xFF16131E, 0xFF0F1916, 0xFF181411, 0xFF1B2028)),
+    SURFACE("Cell surface", 0xFF1C2228, listOf(0xFF1C2228, 0xFF121212, 0xFF231E2E, 0xFF172621, 0xFF26201B, 0xFF28303C)),
+    ACCENT("Accent & 3×3 border", 0xFF75DCC7, listOf(0xFF75DCC7, 0xFF64B5F6, 0xFFB388FF, 0xFFFFB74D, 0xFF81C784, 0xFFF06292)),
+    CELL_BORDER("Inner cell lines", 0xFF38424A, listOf(0xFF38424A, 0xFF2C2C2C, 0xFF4A3E5D, 0xFF2E473E, 0xFF4F4339, 0xFF4E5D6C)),
+    SELECTED_CELL("Selected cell", 0xFF35584F, listOf(0xFF35584F, 0xFF2B4C6F, 0xFF4A3768, 0xFF5C4728, 0xFF345638, 0xFF5C3244)),
+    PEER_HIGHLIGHT("Row/col/box area", 0xFF29333A, listOf(0xFF29333A, 0xFF1E2229, 0xFF312A40, 0xFF21342E, 0xFF362D26, 0xFF343E4D)),
+    MATCHING_NUMBER("Matching number cell", 0xFF296A5B, listOf(0xFF296A5B, 0xFF1E5288, 0xFF563D82, 0xFF7A5621, 0xFF2E6B36, 0xFF7A3352)),
+    MATCHING_NOTE("Matching note box", 0xFF4A6B82, listOf(0xFF4A6B82, 0xFF3E7B6E, 0xFF6A4E90, 0xFF8C6239, 0xFF4B7A47, 0xFF884A66)),
+    COMPLETED_DIGIT_SURFACE("Completed digit button", 0xFF14181D, listOf(0xFF14181D, 0xFF0A0A0A, 0xFF181420, 0xFF111C18, 0xFF1B1613, 0xFF1E242E)),
+    COMPLETED_DIGIT_TEXT("Completed digit text", 0xFF4B565E, listOf(0xFF4B565E, 0xFF424242, 0xFF5D5370, 0xFF4A6158, 0xFF665A4F, 0xFF546470)),
+    INK("Given numbers & text", 0xFFE7ECEF, listOf(0xFFE7ECEF, 0xFFFFFFFF, 0xFFF3E5F5, 0xFFE8F5E9, 0xFFFFF3E0, 0xFFCFD8DC)),
+    MUTED("Notes & secondary text", 0xFF87949D, listOf(0xFF87949D, 0xFF9E9E9E, 0xFFA396B8, 0xFF88A69B, 0xFFA8988A, 0xFF90A4AE)),
+    DANGER("Mistakes & hearts", 0xFFFF8189, listOf(0xFFFF8189, 0xFFFF5252, 0xFFFFAB40, 0xFFFF4081, 0xFFE040FB, 0xFFFF6E40))
+}
+
+data class ThemePalette(
+    val colors: Map<ColorSlot, Long> = ColorSlot.entries.associateWith { it.defaultArgb }
+) {
+    operator fun get(slot: ColorSlot): Long = colors[slot] ?: slot.defaultArgb
+
+    fun withColor(slot: ColorSlot, argb: Long): ThemePalette =
+        copy(colors = colors + (slot to (argb or 0xFF000000L)))
+
+    fun encodeColors(): String =
+        ColorSlot.entries.joinToString(",") { "${it.name}:${get(it).toString(16)}" }
+
+    companion object {
+        fun decodeColors(raw: String): ThemePalette {
+            val parsedColors = ColorSlot.entries.associateWith { it.defaultArgb }.toMutableMap()
+            if (raw.isNotEmpty()) {
+                for (entry in raw.split(",")) {
+                    val kv = entry.split(":")
+                    if (kv.size == 2) {
+                        val slot = ColorSlot.entries.firstOrNull { it.name == kv[0] }
+                        val value = kv[1].toLongOrNull(16)
+                        if (slot != null && value != null) parsedColors[slot] = value or 0xFF000000L
+                    }
+                }
+            }
+            return ThemePalette(parsedColors)
+        }
+
+        fun parseHex(input: String): Long? {
+            val clean = input.trim().removePrefix("#").removePrefix("0x").removePrefix("0X")
+            return when (clean.length) {
+                6 -> clean.toLongOrNull(16)?.let { it or 0xFF000000L }
+                8 -> clean.toLongOrNull(16)?.let { it or 0xFF000000L }
+                else -> null
+            }
+        }
+
+        fun formatHex(argb: Long): String = "%06X".format(argb and 0xFFFFFFL)
+    }
+}
+
+data class SavedTheme(
+    val name: String,
+    val palette: ThemePalette,
+    val builtIn: Boolean = false
+) {
+    companion object {
+        val BUILT_IN: List<SavedTheme> = listOf(
+            SavedTheme("Woku Mint", ThemePalette(), builtIn = true),
+            SavedTheme(
+                "Ocean Blue",
+                ThemePalette(
+                    mapOf(
+                        ColorSlot.BACKGROUND to 0xFF0D1520,
+                        ColorSlot.SURFACE to 0xFF152232,
+                        ColorSlot.ACCENT to 0xFF64B5F6,
+                        ColorSlot.CELL_BORDER to 0xFF2B3E54,
+                        ColorSlot.SELECTED_CELL to 0xFF284B70,
+                        ColorSlot.PEER_HIGHLIGHT to 0xFF1C2D42,
+                        ColorSlot.MATCHING_NUMBER to 0xFF1E5288,
+                        ColorSlot.MATCHING_NOTE to 0xFF3E7B6E,
+                        ColorSlot.COMPLETED_DIGIT_SURFACE to 0xFF101925,
+                        ColorSlot.COMPLETED_DIGIT_TEXT to 0xFF465C75,
+                        ColorSlot.INK to 0xFFE6F0FA,
+                        ColorSlot.MUTED to 0xFF849BB5,
+                        ColorSlot.DANGER to 0xFFFF6E7A
+                    )
+                ),
+                builtIn = true
+            ),
+            SavedTheme(
+                "Amethyst",
+                ThemePalette(
+                    mapOf(
+                        ColorSlot.BACKGROUND to 0xFF14111D,
+                        ColorSlot.SURFACE to 0xFF211C30,
+                        ColorSlot.ACCENT to 0xFFB388FF,
+                        ColorSlot.CELL_BORDER to 0xFF3F3556,
+                        ColorSlot.SELECTED_CELL to 0xFF4A3768,
+                        ColorSlot.PEER_HIGHLIGHT to 0xFF2E2640,
+                        ColorSlot.MATCHING_NUMBER to 0xFF563D82,
+                        ColorSlot.MATCHING_NOTE to 0xFF6A4E90,
+                        ColorSlot.COMPLETED_DIGIT_SURFACE to 0xFF181423,
+                        ColorSlot.COMPLETED_DIGIT_TEXT to 0xFF5D5370,
+                        ColorSlot.INK to 0xFFF3E5F5,
+                        ColorSlot.MUTED to 0xFF9F92B8,
+                        ColorSlot.DANGER to 0xFFFF80AB
+                    )
+                ),
+                builtIn = true
+            ),
+            SavedTheme(
+                "Amber Glow",
+                ThemePalette(
+                    mapOf(
+                        ColorSlot.BACKGROUND to 0xFF181411,
+                        ColorSlot.SURFACE to 0xFF241E1A,
+                        ColorSlot.ACCENT to 0xFFFFB74D,
+                        ColorSlot.CELL_BORDER to 0xFF473B32,
+                        ColorSlot.SELECTED_CELL to 0xFF5C4728,
+                        ColorSlot.PEER_HIGHLIGHT to 0xFF332A23,
+                        ColorSlot.MATCHING_NUMBER to 0xFF7A5621,
+                        ColorSlot.MATCHING_NOTE to 0xFF8C6239,
+                        ColorSlot.COMPLETED_DIGIT_SURFACE to 0xFF1B1613,
+                        ColorSlot.COMPLETED_DIGIT_TEXT to 0xFF665A4F,
+                        ColorSlot.INK to 0xFFFFF3E0,
+                        ColorSlot.MUTED to 0xFFA8988A,
+                        ColorSlot.DANGER to 0xFFFF6E40
+                    )
+                ),
+                builtIn = true
+            ),
+            SavedTheme(
+                "OLED Pitch",
+                ThemePalette(
+                    mapOf(
+                        ColorSlot.BACKGROUND to 0xFF000000,
+                        ColorSlot.SURFACE to 0xFF0A0D10,
+                        ColorSlot.ACCENT to 0xFF81C784,
+                        ColorSlot.CELL_BORDER to 0xFF242B30,
+                        ColorSlot.SELECTED_CELL to 0xFF28472B,
+                        ColorSlot.PEER_HIGHLIGHT to 0xFF151C18,
+                        ColorSlot.MATCHING_NUMBER to 0xFF2E6B36,
+                        ColorSlot.MATCHING_NOTE to 0xFF4B7A47,
+                        ColorSlot.COMPLETED_DIGIT_SURFACE to 0xFF060809,
+                        ColorSlot.COMPLETED_DIGIT_TEXT to 0xFF424E45,
+                        ColorSlot.INK to 0xFFE8F5E9,
+                        ColorSlot.MUTED to 0xFF7E9183,
+                        ColorSlot.DANGER to 0xFFFF5252
+                    )
+                ),
+                builtIn = true
+            )
+        )
+    }
+}
+
+data class AppSettings(
+    val livesEnabled: Boolean = true,
+    val autoAdvanceDigit: Boolean = true,
+    val hapticsEnabled: Boolean = true,
+    val soundVolume: Float = 0.6f,
+    val palette: ThemePalette = ThemePalette(),
+    val customThemes: List<SavedTheme> = emptyList()
+) {
+    val allThemes: List<SavedTheme> get() = SavedTheme.BUILT_IN + customThemes
+
+    fun activeThemeName(): String? = allThemes.firstOrNull { it.palette == palette }?.name
+
+    fun saveCustomTheme(rawName: String): AppSettings {
+        val cleanName = rawName.trim().replace("|", "").replace("~", "").replace(";", "").take(24)
+        if (cleanName.isEmpty()) return this
+        val filtered = customThemes.filterNot { it.name.equals(cleanName, ignoreCase = true) }
+        return copy(customThemes = filtered + SavedTheme(cleanName, palette, builtIn = false))
+    }
+
+    fun deleteCustomTheme(name: String): AppSettings =
+        copy(customThemes = customThemes.filterNot { it.name == name })
+
+    fun encode(): String = listOf(
+        "3",
+        if (livesEnabled) "1" else "0",
+        if (autoAdvanceDigit) "1" else "0",
+        if (hapticsEnabled) "1" else "0",
+        "%.2f".format(java.util.Locale.US, soundVolume.coerceIn(0f, 1f)),
+        palette.encodeColors(),
+        customThemes.joinToString("~") { "${it.name};${it.palette.encodeColors()}" }
+    ).joinToString("|")
+
+    companion object {
+        fun decode(raw: String): AppSettings = runCatching {
+            val parts = raw.split("|")
+            val version = parts.firstOrNull() ?: ""
+            require(version in listOf("1", "2", "3"))
+            val lives = parts[1] == "1"
+            val autoAdvance = parts[2] == "1"
+            val haptics = parts[3] == "1"
+            return when (version) {
+                "1" -> {
+                    require(parts.size >= 5)
+                    AppSettings(lives, autoAdvance, haptics, palette = ThemePalette.decodeColors(parts[4]))
+                }
+                "2" -> {
+                    require(parts.size >= 5)
+                    val palette = ThemePalette.decodeColors(parts[4])
+                    val custom = if (parts.size >= 6 && parts[5].isNotEmpty()) parseCustomThemes(parts[5]) else emptyList()
+                    AppSettings(lives, autoAdvance, haptics, palette = palette, customThemes = custom)
+                }
+                else -> {
+                    require(parts.size >= 6)
+                    val volume = parts[4].toFloatOrNull()?.coerceIn(0f, 1f) ?: 0.6f
+                    val palette = ThemePalette.decodeColors(parts[5])
+                    val custom = if (parts.size >= 7 && parts[6].isNotEmpty()) parseCustomThemes(parts[6]) else emptyList()
+                    AppSettings(lives, autoAdvance, haptics, soundVolume = volume, palette = palette, customThemes = custom)
+                }
+            }
+        }.getOrElse { AppSettings() }
+
+        private fun parseCustomThemes(raw: String): List<SavedTheme> =
+            raw.split("~").mapNotNull { entry ->
+                val idx = entry.indexOf(';')
+                if (idx <= 0) null
+                else SavedTheme(
+                    name = entry.substring(0, idx),
+                    palette = ThemePalette.decodeColors(entry.substring(idx + 1)),
+                    builtIn = false
+                )
+            }
     }
 }

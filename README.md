@@ -6,13 +6,17 @@ A minimal, offline Android Sudoku game built with Kotlin and Jetpack Compose. Da
 
 ## Play
 
-- Tap an empty square, then a number to enter it. Alternatively, select a number first and tap squares to place it. Tap the selected number again to turn off number selection and highlighting.
-- Selecting a number highlights all its filled cells. Selecting a square also shades its row, column, and 3×3 box.
-- **Pencil** toggles manual notes. **Fast pencil** fills every empty square with currently valid candidates, excluding digits present in its row, column **or box**. It overwrites existing notes; one Undo restores all of them.
+- Select a number first, then tap an empty square to place it (or toggle a note when Pencil is active). Tapping a number switches the active number for highlighting and clears any selected cell so it does not modify an already-selected square. Long-press the active number to deselect it and turn off number highlighting. When all 9 instances of a number are correctly placed, that number button is darkened/greyed out and the next incomplete number is automatically selected (toggleable in **Settings**).
+- Selecting a number highlights all filled cells containing it, and highlights matching penciled notes inside their individual 1/9th sub-cells in an alternative color. Tapping a square with an already-placed number selects that number and highlights its matches and notes. Selecting a square also shades its row, column, and 3×3 box.
+- **View only** mode lets you tap cells and numbers to inspect highlights and peers safely without placing numbers or modifying notes.
+- Placing a number automatically clears matching penciled notes in the same row, column, and 3×3 box.
+- **Pencil** toggles manual notes. In Pencil mode with a number selected, you can tap or drag your finger across cells to immediately flip that number's note along your path (grouped as a single Undo step). **Fast pencil** fills every empty square with currently valid candidates, excluding digits present in its row, column **or box**. It overwrites existing notes; one Undo restores all of them.
+- When 9 or fewer cells remain to be solved (`>= 72/81`), a **Fast complete** button appears to finish the board in one step.
 - **Erase** clears the selected editable square. Undo/Redo restore both values and complete note sets. Changing a move after Undo clears the Redo branch.
-- Wrong answers are shown in red and cost one of three lives. Undo does not refund a life. A puzzle ends when all lives are lost or every square matches the known solution.
-- **New** offers Easy, Medium, Hard, Expert, and Extreme. Each generated puzzle has exactly one solution. Difficulty is based on clue count (42/36/30/26/23); it does not promise a particular solving-technique rating.
-- The timer, current puzzle, notes, lives, and move history are saved locally. **Records** shows the best completion time for each difficulty. The timer advances while the app is active.
+- Progress (`X/81`) is shown next to the timer at the top left. Wrong answers are shown in red and cost one of three lives when the three-life limit is enabled. Undo does not refund a life. A puzzle ends when all lives are lost (if lives are enabled) or every square matches the known solution.
+- **Settings** (gear icon at the top right) lets you toggle the three-life limit (`♥` vs `∞`), automatic next-number selection, subtle haptic feedback, and sound volume (for subtle placement/note/completion chimes and the victory fanfare), or open the **Appearance & Themes** submenu to switch between built-in themes, save your own custom themes, or customize every appearance color (including completed digit button/text colors) via swatches, an interactive color wheel, or an exact `#RRGGBB` hex code.
+- **New** offers Easy, Medium, Hard, Expert, and Extreme (generated asynchronously with a loading indicator). Each generated puzzle has exactly one solution. Difficulty is based on clue count (42/36/30/26/23); it does not promise a particular solving-technique rating.
+- The timer, current puzzle, notes, lives, move history, and settings are saved locally. **Records** shows the best completion time for each difficulty. The timer advances while the app is active.
 
 ## Build
 

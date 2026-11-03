@@ -9,15 +9,20 @@ enum class Difficulty(val clues: Int) {
 data class Puzzle(val givens: List<Int>, val solution: List<Int>)
 
 object Sudoku {
-    fun candidates(values: List<Int>, index: Int): Set<Int> {
-        if (values[index] != 0) return emptySet()
+    fun peers(index: Int): Set<Int> {
         val row = index / 9
         val col = index % 9
         val boxRow = row / 3 * 3
         val boxCol = col / 3 * 3
-        val used = (0..8).map { values[row * 9 + it] } +
-            (0..8).map { values[it * 9 + col] } +
-            (0..2).flatMap { r -> (0..2).map { c -> values[(boxRow + r) * 9 + boxCol + c] } }
+        val rowIndices = (0..8).map { row * 9 + it }
+        val colIndices = (0..8).map { it * 9 + col }
+        val boxIndices = (0..2).flatMap { r -> (0..2).map { c -> (boxRow + r) * 9 + boxCol + c } }
+        return (rowIndices + colIndices + boxIndices - index).toSet()
+    }
+
+    fun candidates(values: List<Int>, index: Int): Set<Int> {
+        if (values[index] != 0) return emptySet()
+        val used = peers(index).map { values[it] }
         return (1..9).filterNot { it in used }.toSet()
     }
 
