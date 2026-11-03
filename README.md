@@ -1,5 +1,7 @@
 # Woku Sudoku
 
+For coding agents and contributors: start at [AGENTS.md](AGENTS.md) and the [agent documentation](docs/agent/README.md).
+
 A minimal, offline Android Sudoku game built with Kotlin and Jetpack Compose. Dark mode is the default. No account, ads, permissions, or network access are required.
 
 ## Play
