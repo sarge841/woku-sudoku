@@ -185,6 +185,13 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val prefs = getSharedPreferences("woku", MODE_PRIVATE)
+        val storedBestVersion = prefs.getInt(BestTimes.VERSION_KEY, 1)
+        if (storedBestVersion < BestTimes.CURRENT_VERSION) {
+            prefs.edit().apply {
+                BestTimes.keysToReset(storedBestVersion).forEach(::remove)
+                putInt(BestTimes.VERSION_KEY, BestTimes.CURRENT_VERSION)
+            }.apply()
+        }
         setContent {
             val view = LocalView.current
             val scope = rememberCoroutineScope()
@@ -204,6 +211,7 @@ class MainActivity : ComponentActivity() {
             var showAppearance by remember { mutableStateOf(false) }
             var pendingNew by remember { mutableStateOf<Difficulty?>(null) }
             var generatingDifficulty by remember { mutableStateOf<Difficulty?>(null) }
+            var checkMessage by remember { mutableStateOf<String?>(null) }
 
             val palette = settings.palette
             val bgColor = palette.color(ColorSlot.BACKGROUND)
@@ -217,6 +225,11 @@ class MainActivity : ComponentActivity() {
                 val bgArgb = palette[ColorSlot.BACKGROUND].toInt()
                 window.statusBarColor = bgArgb
                 window.navigationBarColor = bgArgb
+                if (settings.keepScreenOn) {
+                    window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                } else {
+                    window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
             }
 
             fun updateSettings(next: AppSettings) {
@@ -228,11 +241,12 @@ class MainActivity : ComponentActivity() {
                 val wasWon = game.status(settings.livesEnabled) == GameStatus.WON
                 val isWon = next.status(settings.livesEnabled) == GameStatus.WON
                 if (!wasWon && isWon) {
-                    val key = "best_${next.difficulty.name}"
+                    val key = BestTimes.key(next.difficulty)
                     val old = prefs.getInt(key, Int.MAX_VALUE)
                     if (next.elapsedSeconds < old) prefs.edit().putInt(key, next.elapsedSeconds).apply()
                     SoundEngine.play(SoundEffect.VICTORY, settings.soundVolume)
                 }
+                if (next.values != game.values || next.puzzle != game.puzzle) checkMessage = null
                 game = next
                 prefs.edit().putString("game", SaveCodec.encode(next)).apply()
             }
@@ -261,27 +275,31 @@ class MainActivity : ComponentActivity() {
                     selectedDigit = selection.selectedDigit,
                     pencil = selection.pencil,
                     viewOnly = selection.viewOnly,
-                    best = prefs.getInt("best_${game.difficulty.name}", Int.MAX_VALUE).takeUnless { it == Int.MAX_VALUE },
+                    best = prefs.getInt(BestTimes.key(game.difficulty), Int.MAX_VALUE).takeUnless { it == Int.MAX_VALUE },
                     onCell = { index ->
+                        val hide = settings.hideMistakesUntilChecked
                         val prevGame = game
                         val placedDigit = selection.selectedDigit
                         val (nextGame, nextSelection) = selection.onCellTap(
                             game = prevGame,
                             index = index,
                             livesEnabled = settings.livesEnabled,
-                            autoAdvanceDigit = settings.autoAdvanceDigit
+                            autoAdvanceDigit = settings.autoAdvanceDigit,
+                            hideMistakes = hide
                         )
-                        val mistake = nextGame.lives < prevGame.lives ||
-                            (nextGame.values != prevGame.values && nextGame.values[index] != 0 && nextGame.values[index] != nextGame.puzzle.solution[index])
+                        // With hidden mistakes, sounds/haptics must not reveal whether a placement was right.
+                        val mistake = !hide && (nextGame.lives < prevGame.lives ||
+                            (nextGame.values != prevGame.values && nextGame.values[index] != 0 && nextGame.values[index] != nextGame.puzzle.solution[index]))
                         selection = nextSelection
                         if (nextGame != prevGame) {
                             update(nextGame)
                             if (nextGame.status(settings.livesEnabled) != GameStatus.WON) {
                                 when {
                                     mistake -> SoundEngine.play(SoundEffect.MISTAKE, settings.soundVolume)
-                                    nextGame.values != prevGame.values && placedDigit != null && nextGame.isDigitComplete(placedDigit) ->
+                                    nextGame.values != prevGame.values && placedDigit != null && nextGame.isDigitComplete(placedDigit, hide) ->
                                         SoundEngine.play(SoundEffect.DIGIT_COMPLETE, settings.soundVolume)
-                                    nextGame.values != prevGame.values && nextGame.values[index] == nextGame.puzzle.solution[index] ->
+                                    nextGame.values != prevGame.values && nextGame.values[index] != 0 &&
+                                        (hide || nextGame.values[index] == nextGame.puzzle.solution[index]) ->
                                         SoundEngine.play(SoundEffect.CORRECT_PLACE, settings.soundVolume)
                                     nextGame.notes != prevGame.notes ->
                                         SoundEngine.play(SoundEffect.NOTE_TOGGLE, settings.soundVolume)
@@ -331,8 +349,23 @@ class MainActivity : ComponentActivity() {
                         view.tickHaptic(settings.hapticsEnabled)
                     },
                     onFastComplete = {
-                        update(game.fastComplete(settings.livesEnabled))
+                        update(game.fastComplete(settings.livesEnabled, settings.hideMistakesUntilChecked))
                         view.tickHaptic(settings.hapticsEnabled, strong = true)
+                    },
+                    checkMessage = checkMessage,
+                    onCheck = {
+                        val checked = game.checkMistakes(settings.livesEnabled)
+                        val found = checked.revealedMistakes.size
+                        update(checked)
+                        checkMessage = when (found) {
+                            0 -> "NO MISTAKES SO FAR"
+                            1 -> "1 MISTAKE FOUND"
+                            else -> "$found MISTAKES FOUND"
+                        }
+                        if (checked.status(settings.livesEnabled) == GameStatus.PLAYING) {
+                            SoundEngine.play(if (found > 0) SoundEffect.MISTAKE else SoundEffect.CORRECT_PLACE, settings.soundVolume)
+                        }
+                        view.tickHaptic(settings.hapticsEnabled, strong = found > 0)
                     },
                     onErase = {
                         selection.selectedCell?.let {
@@ -361,7 +394,7 @@ class MainActivity : ComponentActivity() {
                                 TextButton(
                                     onClick = { showNew = false; pendingNew = level },
                                     modifier = Modifier.fillMaxWidth()
-                                ) { Text(level.name.lowercase().replaceFirstChar { it.uppercase() }) }
+                                ) { Text(level.label) }
                             }
                         }
                     },
@@ -370,7 +403,7 @@ class MainActivity : ComponentActivity() {
                 pendingNew?.let { level ->
                     AlertDialog(
                         onDismissRequest = { pendingNew = null },
-                        title = { Text("Start ${level.name.lowercase()}?") },
+                        title = { Text("Start ${level.label}?") },
                         text = { Text("This replaces your current puzzle. Best times stay saved.") },
                         confirmButton = {
                             TextButton(onClick = {
@@ -405,7 +438,7 @@ class MainActivity : ComponentActivity() {
                                     strokeWidth = 3.dp
                                 )
                                 Text(
-                                    "Creating a unique ${level.name.lowercase()} board…",
+                                    "Creating a unique ${level.label} board…",
                                     color = mutedColor,
                                     fontSize = 14.sp
                                 )
@@ -420,9 +453,9 @@ class MainActivity : ComponentActivity() {
                     text = {
                         Column {
                             Difficulty.entries.forEach { level ->
-                                val seconds = prefs.getInt("best_${level.name}", Int.MAX_VALUE)
+                                val seconds = prefs.getInt(BestTimes.key(level), Int.MAX_VALUE)
                                 Text(
-                                    "${level.name.lowercase().replaceFirstChar { it.uppercase() }}  ·  ${if (seconds == Int.MAX_VALUE) "—" else formatTime(seconds)}",
+                                    "${level.label}  ·  ${if (seconds == Int.MAX_VALUE) "—" else formatTime(seconds)}",
                                     color = inkColor,
                                     modifier = Modifier.padding(vertical = 5.dp)
                                 )
@@ -480,6 +513,8 @@ private fun SudokuScreen(
     onViewOnly: () -> Unit,
     onFastPencil: () -> Unit,
     onFastComplete: () -> Unit,
+    checkMessage: String?,
+    onCheck: () -> Unit,
     onErase: () -> Unit,
     onUndo: () -> Unit,
     onRedo: () -> Unit,
@@ -496,6 +531,7 @@ private fun SudokuScreen(
     val dangerColor = palette.color(ColorSlot.DANGER)
     val status = game.status(settings.livesEnabled)
     val playing = status == GameStatus.PLAYING
+    val hideMistakes = settings.hideMistakesUntilChecked
 
     Column(
         Modifier
@@ -509,7 +545,7 @@ private fun SudokuScreen(
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text("WOKU", fontSize = 24.sp, fontWeight = FontWeight.Bold, color = inkColor, letterSpacing = 3.sp)
-                Text(game.difficulty.name.lowercase().replaceFirstChar { it.uppercase() }, color = mutedColor, fontSize = 13.sp)
+                Text(game.difficulty.label, color = mutedColor, fontSize = 13.sp)
             }
             TextButton(onClick = onBest, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("Records", color = accentColor) }
             TextButton(onClick = onNew, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("New", color = accentColor) }
@@ -520,7 +556,7 @@ private fun SudokuScreen(
         Spacer(Modifier.height(18.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("${game.correctCount}/81", color = accentColor, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text("${game.progressCount(hideMistakes)}/81", color = accentColor, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.width(12.dp))
                 Text("TIME  ${formatTime(game.elapsedSeconds)}", color = inkColor, fontSize = 14.sp)
             }
@@ -538,6 +574,7 @@ private fun SudokuScreen(
             selectedCell = selectedCell,
             selectedDigit = selectedDigit,
             pencilDragEnabled = pencil && !viewOnly && selectedDigit != null && playing,
+            hideMistakes = hideMistakes,
             onCell = onCell,
             onPencilDragCell = onPencilDragCell
         )
@@ -551,11 +588,18 @@ private fun SudokuScreen(
         } else {
             Text(
                 when {
+                    hideMistakes && checkMessage != null -> checkMessage
+                    hideMistakes && game.emptyCount == 0 -> "BOARD FULL  ·  TAP CHECK TO FIND MISTAKES"
                     viewOnly -> "VIEW ONLY MODE"
                     pencil -> "PENCIL MODE  ·  TAP OR DRAG TO TOGGLE NOTES"
                     else -> "SELECT A NUMBER THEN TAP A CELL"
                 },
-                color = if (viewOnly || pencil) accentColor else mutedColor,
+                color = when {
+                    hideMistakes && (checkMessage != null || game.emptyCount == 0) ->
+                        if (game.revealedMistakes.isEmpty() && checkMessage != null) accentColor else dangerColor
+                    viewOnly || pencil -> accentColor
+                    else -> mutedColor
+                },
                 fontSize = 11.sp,
                 letterSpacing = 1.5.sp
             )
@@ -566,9 +610,8 @@ private fun SudokuScreen(
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
             (1..9).forEach { digit ->
                 val active = selectedDigit == digit
-                val completed = game.isDigitComplete(digit)
-                val correctDigitCount = (0..80).count { game.values[it] == digit && game.puzzle.solution[it] == digit }
-                val remaining = (9 - correctDigitCount).coerceAtLeast(0)
+                val completed = game.isDigitComplete(digit, hideMistakes)
+                val remaining = (9 - game.digitCount(digit, hideMistakes)).coerceAtLeast(0)
                 val buttonBg = when {
                     active -> accentColor
                     completed -> completedDigitSurface
@@ -612,9 +655,13 @@ private fun SudokuScreen(
             ActionButton(if (pencil) "Pencil ON" else "Pencil", playing, onPencil, Modifier.weight(1f), palette, active = pencil)
             ActionButton("Fast pencil", !viewOnly && playing, onFastPencil, Modifier.weight(1f), palette)
         }
-        if (game.canFastComplete(settings.livesEnabled)) {
+        if (hideMistakes) {
             Spacer(Modifier.height(8.dp))
-            ActionButton("Fast complete (${game.remainingCount} left)", true, onFastComplete, Modifier.fillMaxWidth(), palette, active = true)
+            ActionButton("Check for mistakes", playing, onCheck, Modifier.fillMaxWidth(), palette)
+        }
+        if (game.canFastComplete(settings.livesEnabled, hideMistakes)) {
+            Spacer(Modifier.height(8.dp))
+            ActionButton("Fast complete (${game.fastCompleteCount(hideMistakes)} left)", true, onFastComplete, Modifier.fillMaxWidth(), palette, active = true)
         }
     }
 }
@@ -650,6 +697,7 @@ private fun SudokuGrid(
     selectedCell: Int?,
     selectedDigit: Int?,
     pencilDragEnabled: Boolean,
+    hideMistakes: Boolean,
     onCell: (Int) -> Unit,
     onPencilDragCell: (Int, Boolean) -> Boolean
 ) {
@@ -778,7 +826,7 @@ private fun SudokuGrid(
                         if (value != 0) Text(
                             "$value",
                             color = when {
-                                value != game.puzzle.solution[index] -> dangerColor
+                                game.showsMistake(index, hideMistakes) -> dangerColor
                                 game.puzzle.givens[index] != 0 -> inkColor
                                 else -> accentColor
                             },
@@ -849,6 +897,14 @@ private fun SettingsDialog(
                     onCheckedChange = { onUpdate(settings.copy(livesEnabled = it)) }
                 )
                 SettingToggleRow(
+                    title = "Hide mistakes until checked",
+                    subtitle = "No red digits or lost hearts while playing; tap Check to reveal mistakes (each new one costs a heart)",
+                    checked = settings.hideMistakesUntilChecked,
+                    inkColor = inkColor,
+                    mutedColor = mutedColor,
+                    onCheckedChange = { onUpdate(settings.copy(hideMistakesUntilChecked = it)) }
+                )
+                SettingToggleRow(
                     title = "Auto-select next number",
                     subtitle = "Advance to next incomplete digit when all 9 are placed",
                     checked = settings.autoAdvanceDigit,
@@ -863,6 +919,14 @@ private fun SettingsDialog(
                     inkColor = inkColor,
                     mutedColor = mutedColor,
                     onCheckedChange = { onUpdate(settings.copy(hapticsEnabled = it)) }
+                )
+                SettingToggleRow(
+                    title = "Keep screen awake",
+                    subtitle = "Prevent screen from dimming or sleeping while playing",
+                    checked = settings.keepScreenOn,
+                    inkColor = inkColor,
+                    mutedColor = mutedColor,
+                    onCheckedChange = { onUpdate(settings.copy(keepScreenOn = it)) }
                 )
                 Column(Modifier.fillMaxWidth()) {
                     Row(

@@ -2,18 +2,57 @@ package com.sarge841.woku
 
 import kotlin.random.Random
 
-enum class Difficulty(val clues: Int) {
-    EASY(42), MEDIUM(36), HARD(30), EXPERT(26), EXTREME(23), DIABOLICAL(17)
+/**
+ * Easy/Medium/Hard are generated on device by clue count ([clues]). Expert and above are drawn
+ * from a bundled, technique-rated bank ([bank], Sukaku Explainer rating in [ratingRange]); see
+ * [PuzzleBank].
+ */
+enum class Difficulty(
+    val label: String,
+    val clues: Int? = null,
+    val bank: String? = null,
+    val ratingRange: ClosedFloatingPointRange<Double>? = null
+) {
+    EASY("Easy", clues = 42),
+    MEDIUM("Medium", clues = 36),
+    HARD("Hard", clues = 30),
+    EXPERT("Expert", bank = "expert", ratingRange = 4.0..5.9),
+    EXTREME("Extreme", bank = "extreme", ratingRange = 6.0..6.9),
+    DIABOLICAL("Diabolical", bank = "diabolical", ratingRange = 7.0..8.4),
+    DIABOLICAL_PLUS("Diabolical+", bank = "diabolical_plus", ratingRange = 8.5..10.0)
 }
 
 data class Puzzle(val givens: List<Int>, val solution: List<Int>)
 
+data class BankEntry(val givens: String, val rating: Double)
+
+/**
+ * Bundled puzzles from the public-domain Sudoku Exchange Puzzle Bank, rated with Sukaku Explainer.
+ * Files live in `src/main/resources/com/sarge841/woku/puzzles/` (one `<81 digits> <rating>` per
+ * line) and are rebuilt by `scripts/build_puzzle_bank.py`. Plain Java resources keep this
+ * Android-independent so unit tests can read the same data the app ships.
+ */
+object PuzzleBank {
+    private val cache = mutableMapOf<String, List<BankEntry>>()
+
+    fun entries(difficulty: Difficulty): List<BankEntry> {
+        val name = difficulty.bank ?: return emptyList()
+        return synchronized(cache) {
+            cache.getOrPut(name) {
+                val stream = PuzzleBank::class.java.getResourceAsStream("/com/sarge841/woku/puzzles/$name.txt")
+                    ?: error("Missing puzzle bank $name")
+                stream.bufferedReader().useLines { lines ->
+                    lines.filter { it.isNotBlank() }.map { line ->
+                        val parts = line.trim().split(" ")
+                        BankEntry(parts[0], parts[1].toDouble())
+                    }.toList()
+                }
+            }
+        }
+    }
+}
+
 object Sudoku {
-    private val DIABOLICAL_TEMPLATES = listOf(
-        "000000010400000000020000000000050407008000300001090000300400200050100000000806000",
-        "000000012000035000000600070700000300000400800100000000000120000080000040050000600",
-        "000700000100000000000430200000000006000509000000000418000081000002000050040000300"
-    )
 
     fun peers(index: Int): Set<Int> {
         val row = index / 9
@@ -97,23 +136,13 @@ object Sudoku {
 
     fun generate(difficulty: Difficulty, seed: Long = Random.nextLong()): Puzzle {
         val random = Random(seed)
-        if (difficulty == Difficulty.DIABOLICAL) {
-            val template = DIABOLICAL_TEMPLATES.random(random).map { it.digitToInt() }
-            val digitMap = (1..9).shuffled(random)
-            val rows = (0..2).shuffled(random).flatMap { band -> (0..2).shuffled(random).map { band * 3 + it } }
-            val cols = (0..2).shuffled(random).flatMap { stack -> (0..2).shuffled(random).map { stack * 3 + it } }
-            val transpose = random.nextBoolean()
-            val givens = List(81) { idx ->
-                val r = idx / 9
-                val c = idx % 9
-                val srcRow = if (transpose) cols[c] else rows[r]
-                val srcCol = if (transpose) rows[r] else cols[c]
-                val v = template[srcRow * 9 + srcCol]
-                if (v == 0) 0 else digitMap[v - 1]
-            }
-            val solution = solve(givens) ?: error("Invalid diabolical template")
+        if (difficulty.bank != null) {
+            val entry = PuzzleBank.entries(difficulty).random(random)
+            val givens = transform(entry.givens.map { it.digitToInt() }, random)
+            val solution = solve(givens) ?: error("Invalid ${difficulty.label} bank puzzle")
             return Puzzle(givens, solution)
         }
+        val clues = difficulty.clues ?: error("${difficulty.label} has no clue target")
         repeat(500) {
             val digits = (1..9).shuffled(random)
             val rows = (0..2).shuffled(random).flatMap { band -> (0..2).shuffled(random).map { band * 3 + it } }
@@ -121,13 +150,33 @@ object Sudoku {
             val solution = rows.flatMap { row -> cols.map { col -> digits[(row * 3 + row / 3 + col) % 9] } }
             val board = solution.toMutableList()
             for (i in (0..80).shuffled(random)) {
-                if (board.count { it != 0 } == difficulty.clues) break
+                if (board.count { it != 0 } == clues) break
                 val old = board[i]
                 board[i] = 0
                 if (countSolutions(board) != 1) board[i] = old
             }
-            if (board.count { it != 0 } == difficulty.clues) return Puzzle(board, solution)
+            if (board.count { it != 0 } == clues) return Puzzle(board, solution)
         }
-        error("Could not generate a unique ${difficulty.name.lowercase()} puzzle")
+        error("Could not generate a unique ${difficulty.label} puzzle")
+    }
+
+    /**
+     * Applies a random rating-preserving symmetry: digit relabeling, band/stack and in-band
+     * row/column shuffles, and an optional transpose. Uniqueness and solving techniques are
+     * unchanged, so each bank puzzle yields many distinct-looking boards.
+     */
+    fun transform(board: List<Int>, random: Random): List<Int> {
+        val digitMap = (1..9).shuffled(random)
+        val rows = (0..2).shuffled(random).flatMap { band -> (0..2).shuffled(random).map { band * 3 + it } }
+        val cols = (0..2).shuffled(random).flatMap { stack -> (0..2).shuffled(random).map { stack * 3 + it } }
+        val transpose = random.nextBoolean()
+        return List(81) { idx ->
+            val r = idx / 9
+            val c = idx % 9
+            val srcRow = if (transpose) cols[c] else rows[r]
+            val srcCol = if (transpose) rows[r] else cols[c]
+            val v = board[srcRow * 9 + srcCol]
+            if (v == 0) 0 else digitMap[v - 1]
+        }
     }
 }

@@ -260,4 +260,79 @@ class GameTest {
         val undone = step3.undo()
         assertEquals(start.notes, undone.notes)
     }
+
+    @Test fun hiddenMistakesCostNoLifeAndDoNotLeakThroughDisplayOrProgress() {
+        val wrong = game().place(1, 9, hideMistakes = true)
+        assertEquals(3, wrong.lives)
+        assertFalse(wrong.showsMistake(1, hideMistakes = true))
+        assertTrue(wrong.showsMistake(1, hideMistakes = false))
+        assertEquals(2, wrong.progressCount(hideMistakes = true))
+        assertEquals(1, wrong.progressCount(hideMistakes = false))
+        assertEquals(1, wrong.digitCount(9, hideMistakes = true))
+        assertEquals(0, wrong.digitCount(9, hideMistakes = false))
+    }
+
+    @Test fun checkRevealsMistakesChargesEachNewOneOnceAndEditsHideThem() {
+        val start = game().place(1, 9, hideMistakes = true).place(2, 8, hideMistakes = true).place(3, 6, hideMistakes = true)
+        val checked = start.checkMistakes()
+        assertEquals(1, checked.lives)
+        assertEquals(mapOf(1 to 9, 2 to 8), checked.revealedMistakes)
+        assertTrue(checked.showsMistake(1, hideMistakes = true))
+        assertFalse(checked.showsMistake(3, hideMistakes = true))
+        assertEquals(start.history, checked.history)
+        // Re-checking the same mistakes is free.
+        assertEquals(1, checked.checkMistakes().lives)
+        // Changing a revealed cell hides its mark; a new wrong value there costs a life on the next check.
+        val edited = checked.place(1, 7, hideMistakes = true)
+        assertFalse(edited.showsMistake(1, hideMistakes = true))
+        val rechecked = edited.checkMistakes()
+        assertEquals(0, rechecked.lives)
+        assertEquals(GameStatus.LOST, rechecked.status)
+        // Without lives, checks only reveal.
+        assertEquals(3, start.checkMistakes(livesEnabled = false).lives)
+    }
+
+    @Test fun hiddenFastCompleteFillsOnlyEmptyCellsAndKeepsWrongEntries() {
+        val nearly = solution.mapIndexed { i, n -> if (i in 70..80) 0 else n }
+        val start = GameState.new(Puzzle(nearly, solution), Difficulty.EASY)
+            .place(70, if (solution[70] == 1) 2 else 1, hideMistakes = true).place(71, solution[71], hideMistakes = true)
+        assertEquals(9, start.fastCompleteCount(hideMistakes = true))
+        assertTrue(start.canFastComplete(livesEnabled = true, hideMistakes = true))
+        val done = start.fastComplete(hideMistakes = true)
+        assertEquals(0, done.emptyCount)
+        assertEquals(start.values[70], done.values[70])
+        assertEquals(GameStatus.PLAYING, done.status)
+        // Normal mode counts the wrong entry as remaining (10), so fast complete is not offered.
+        assertEquals(10, start.fastCompleteCount())
+        assertFalse(start.canFastComplete(livesEnabled = true))
+    }
+
+    @Test fun hiddenModeAutoAdvanceCountsPlacementsNotCorrectness() {
+        val oneLeft = solution.mapIndexed { i, n -> if (n == 9 && i != 80) n else 0 }
+        val board = GameState.new(Puzzle(oneLeft, solution), Difficulty.EASY)
+        val wrongCell = board.values.indices.first { board.values[it] == 0 && solution[it] != 9 && it != 80 }
+        val (next, selection) = SelectionState(selectedDigit = 9).onCellTap(board, wrongCell, hideMistakes = true)
+        assertEquals(3, next.lives)
+        assertTrue(next.isDigitComplete(9, hideMistakes = true))
+        assertEquals(1, selection.selectedDigit)
+    }
+
+    @Test fun bestTimeResetClearsOnlyRedefinedTiersOnce() {
+        assertEquals(listOf("best_EXPERT", "best_EXTREME", "best_DIABOLICAL"), BestTimes.keysToReset(1))
+        assertTrue(BestTimes.keysToReset(BestTimes.CURRENT_VERSION).isEmpty())
+        assertEquals("best_DIABOLICAL_PLUS", BestTimes.key(Difficulty.DIABOLICAL_PLUS))
+    }
+
+    @Test fun settingsKeepHideMistakesOffByDefaultAndRoundTripIt() {
+        assertFalse(AppSettings().hideMistakesUntilChecked)
+        assertTrue(AppSettings().keepScreenOn)
+        val on = AppSettings(hideMistakesUntilChecked = true, keepScreenOn = false)
+        assertEquals(on, AppSettings.decode(on.encode()))
+        val v3 = AppSettings().encode().replaceFirst("5|", "3|").substringBeforeLast("|").substringBeforeLast("|")
+        assertFalse(AppSettings.decode(v3).hideMistakesUntilChecked)
+        assertTrue(AppSettings.decode(v3).keepScreenOn)
+        assertEquals(AppSettings(), AppSettings.decode(v3))
+        val v4 = AppSettings().encode().replaceFirst("5|", "4|").substringBeforeLast("|")
+        assertTrue(AppSettings.decode(v4).keepScreenOn)
+    }
 }

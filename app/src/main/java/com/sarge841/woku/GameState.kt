@@ -12,7 +12,9 @@ data class GameState(
     val lives: Int = 3,
     val elapsedSeconds: Int = 0,
     val history: List<BoardSnapshot> = emptyList(),
-    val future: List<BoardSnapshot> = emptyList()
+    val future: List<BoardSnapshot> = emptyList(),
+    /** Cell → wrong value revealed by [checkMistakes] (used only when mistakes are hidden until checked). */
+    val revealedMistakes: Map<Int, Int> = emptyMap()
 ) {
     val status: GameStatus get() = when {
         lives == 0 -> GameStatus.LOST
@@ -26,26 +28,61 @@ data class GameState(
         else -> GameStatus.PLAYING
     }
 
-    fun isDigitComplete(digit: Int): Boolean =
-        digit in 1..9 && (0..80).count { values[it] == digit && puzzle.solution[it] == digit } == 9
+    /**
+     * How many of [digit] count toward completion. Normally only correct placements count; when
+     * [hideMistakes] is on, every placement counts so the UI does not leak correctness.
+     */
+    fun digitCount(digit: Int, hideMistakes: Boolean = false): Int =
+        if (hideMistakes) values.count { it == digit }
+        else (0..80).count { values[it] == digit && puzzle.solution[it] == digit }
 
-    fun nextIncompleteDigit(fromDigit: Int): Int? =
-        (1..9).map { (fromDigit - 1 + it) % 9 + 1 }.firstOrNull { !isDigitComplete(it) }
+    fun isDigitComplete(digit: Int, hideMistakes: Boolean = false): Boolean =
+        digit in 1..9 && digitCount(digit, hideMistakes) >= 9
+
+    fun nextIncompleteDigit(fromDigit: Int, hideMistakes: Boolean = false): Int? =
+        (1..9).map { (fromDigit - 1 + it) % 9 + 1 }.firstOrNull { !isDigitComplete(it, hideMistakes) }
 
     val correctCount: Int get() = values.indices.count { values[it] != 0 && values[it] == puzzle.solution[it] }
 
     val remainingCount: Int get() = 81 - correctCount
 
+    val emptyCount: Int get() = values.count { it == 0 }
+
+    /** Progress shown to the player: correct cells, or filled cells when mistakes are hidden. */
+    fun progressCount(hideMistakes: Boolean = false): Int = if (hideMistakes) 81 - emptyCount else correctCount
+
+    /** Cells the fast-complete button would fill. */
+    fun fastCompleteCount(hideMistakes: Boolean = false): Int = if (hideMistakes) emptyCount else remainingCount
+
     val canFastComplete: Boolean get() = status == GameStatus.PLAYING && remainingCount in 1..9
 
-    fun canFastComplete(livesEnabled: Boolean): Boolean =
-        status(livesEnabled) == GameStatus.PLAYING && remainingCount in 1..9
+    fun canFastComplete(livesEnabled: Boolean, hideMistakes: Boolean = false): Boolean =
+        status(livesEnabled) == GameStatus.PLAYING && fastCompleteCount(hideMistakes) in 1..9
+
+    /** Whether cell [index] should be drawn as a mistake. Hidden mistakes show only after [checkMistakes]. */
+    fun showsMistake(index: Int, hideMistakes: Boolean = false): Boolean {
+        val v = values[index]
+        if (v == 0 || v == puzzle.solution[index]) return false
+        return !hideMistakes || revealedMistakes[index] == v
+    }
+
+    /**
+     * Reveals every wrong placement. Each newly revealed wrong cell/value costs one life when lives
+     * are enabled (a mistake already revealed is not charged again). Does not touch undo history.
+     */
+    fun checkMistakes(livesEnabled: Boolean = true): GameState {
+        if (status(livesEnabled) != GameStatus.PLAYING) return this
+        val wrong = values.indices.filter { values[it] != 0 && values[it] != puzzle.solution[it] }
+        val newlyFound = wrong.count { revealedMistakes[it] != values[it] }
+        val newLives = if (livesEnabled) (lives - newlyFound).coerceAtLeast(0) else lives
+        return copy(lives = newLives, revealedMistakes = wrong.associateWith { values[it] })
+    }
 
     private fun changed(newValues: List<Int>, newNotes: List<Set<Int>>, newLives: Int = lives): GameState =
         copy(values = newValues, notes = newNotes, lives = newLives,
             history = (history + BoardSnapshot(values, notes)).takeLast(200), future = emptyList())
 
-    fun place(index: Int, digit: Int, livesEnabled: Boolean = true): GameState {
+    fun place(index: Int, digit: Int, livesEnabled: Boolean = true, hideMistakes: Boolean = false): GameState {
         if (status(livesEnabled) != GameStatus.PLAYING || index !in 0..80 || digit !in 0..9 || puzzle.givens[index] != 0 || values[index] == digit) return this
         val newValues = values.toMutableList().also { it[index] = digit }
         val newNotes = notes.toMutableList().also { list ->
@@ -56,13 +93,15 @@ data class GameState(
                 }
             }
         }
-        val life = if (livesEnabled && digit != 0 && digit != puzzle.solution[index]) (lives - 1).coerceAtLeast(0) else lives
+        val life = if (livesEnabled && !hideMistakes && digit != 0 && digit != puzzle.solution[index]) (lives - 1).coerceAtLeast(0) else lives
         return changed(newValues, newNotes, life)
     }
 
-    fun fastComplete(livesEnabled: Boolean = true): GameState {
-        if (!canFastComplete(livesEnabled)) return this
-        return changed(puzzle.solution, List(81) { emptySet() })
+    /** Fills the board with the solution. With [hideMistakes], only empty cells are filled (wrong entries stay). */
+    fun fastComplete(livesEnabled: Boolean = true, hideMistakes: Boolean = false): GameState {
+        if (!canFastComplete(livesEnabled, hideMistakes)) return this
+        val filled = if (hideMistakes) values.indices.map { if (values[it] == 0) puzzle.solution[it] else values[it] } else puzzle.solution
+        return changed(filled, List(81) { emptySet() })
     }
 
     fun toggleNote(
@@ -116,7 +155,8 @@ data class SelectionState(
         game: GameState,
         index: Int,
         livesEnabled: Boolean = true,
-        autoAdvanceDigit: Boolean = true
+        autoAdvanceDigit: Boolean = true,
+        hideMistakes: Boolean = false
     ): Pair<GameState, SelectionState> {
         val placed = game.values.getOrNull(index) ?: 0
         if (placed != 0) {
@@ -131,9 +171,9 @@ data class SelectionState(
         if (pencil) {
             return game.toggleNote(index, digit, livesEnabled, recordHistory = true) to nextSelection
         }
-        val nextGame = game.place(index, digit, livesEnabled)
-        val updatedSelection = if (autoAdvanceDigit && nextGame != game && nextGame.isDigitComplete(digit)) {
-            nextSelection.copy(selectedDigit = nextGame.nextIncompleteDigit(digit))
+        val nextGame = game.place(index, digit, livesEnabled, hideMistakes)
+        val updatedSelection = if (autoAdvanceDigit && nextGame != game && nextGame.isDigitComplete(digit, hideMistakes)) {
+            nextSelection.copy(selectedDigit = nextGame.nextIncompleteDigit(digit, hideMistakes))
         } else {
             nextSelection
         }
@@ -323,7 +363,11 @@ data class AppSettings(
     val hapticsEnabled: Boolean = true,
     val soundVolume: Float = 0.6f,
     val palette: ThemePalette = ThemePalette(),
-    val customThemes: List<SavedTheme> = emptyList()
+    val customThemes: List<SavedTheme> = emptyList(),
+    /** Off by default: wrong digits are hidden (no red, no life loss) until the player taps Check. */
+    val hideMistakesUntilChecked: Boolean = false,
+    /** On by default: prevents screen from dimming/sleeping while playing. */
+    val keepScreenOn: Boolean = true
 ) {
     val allThemes: List<SavedTheme> get() = SavedTheme.BUILT_IN + customThemes
 
@@ -340,20 +384,22 @@ data class AppSettings(
         copy(customThemes = customThemes.filterNot { it.name == name })
 
     fun encode(): String = listOf(
-        "3",
+        "5",
         if (livesEnabled) "1" else "0",
         if (autoAdvanceDigit) "1" else "0",
         if (hapticsEnabled) "1" else "0",
         "%.2f".format(java.util.Locale.US, soundVolume.coerceIn(0f, 1f)),
         palette.encodeColors(),
-        customThemes.joinToString("~") { "${it.name};${it.palette.encodeColors()}" }
+        customThemes.joinToString("~") { "${it.name};${it.palette.encodeColors()}" },
+        if (hideMistakesUntilChecked) "1" else "0",
+        if (keepScreenOn) "1" else "0"
     ).joinToString("|")
 
     companion object {
         fun decode(raw: String): AppSettings = runCatching {
             val parts = raw.split("|")
             val version = parts.firstOrNull() ?: ""
-            require(version in listOf("1", "2", "3"))
+            require(version in listOf("1", "2", "3", "4", "5"))
             val lives = parts[1] == "1"
             val autoAdvance = parts[2] == "1"
             val haptics = parts[3] == "1"
@@ -373,7 +419,10 @@ data class AppSettings(
                     val volume = parts[4].toFloatOrNull()?.coerceIn(0f, 1f) ?: 0.6f
                     val palette = ThemePalette.decodeColors(parts[5])
                     val custom = if (parts.size >= 7 && parts[6].isNotEmpty()) parseCustomThemes(parts[6]) else emptyList()
-                    AppSettings(lives, autoAdvance, haptics, soundVolume = volume, palette = palette, customThemes = custom)
+                    val hideMistakes = version in listOf("4", "5") && parts.size >= 8 && parts[7] == "1"
+                    val keepScreen = if (version == "5" && parts.size >= 9) parts[8] == "1" else true
+                    AppSettings(lives, autoAdvance, haptics, soundVolume = volume, palette = palette,
+                        customThemes = custom, hideMistakesUntilChecked = hideMistakes, keepScreenOn = keepScreen)
                 }
             }
         }.getOrElse { AppSettings() }
@@ -389,4 +438,18 @@ data class AppSettings(
                 )
             }
     }
+}
+
+/** Best-time storage keys and one-time resets when a difficulty's meaning changes. */
+object BestTimes {
+    /** v2: Expert/Extreme/Diabolical moved from clue counts to the technique-rated puzzle bank. */
+    const val CURRENT_VERSION = 2
+    const val VERSION_KEY = "best_version"
+
+    fun key(difficulty: Difficulty): String = "best_${difficulty.name}"
+
+    /** Keys to delete when upgrading from [storedVersion]; empty when already current. */
+    fun keysToReset(storedVersion: Int): List<String> =
+        if (storedVersion < 2) listOf(Difficulty.EXPERT, Difficulty.EXTREME, Difficulty.DIABOLICAL).map(::key)
+        else emptyList()
 }

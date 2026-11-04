@@ -15,8 +15,9 @@ A minimal, offline Android Sudoku game built with Kotlin and Jetpack Compose. Da
 - **Erase** clears the selected editable square. Undo/Redo restore both values and complete note sets. Changing a move after Undo clears the Redo branch.
 - Progress (`X/81`) is shown next to the timer at the top left. Wrong answers are shown in red and cost one of three lives when the three-life limit is enabled. Undo does not refund a life. A puzzle ends when all lives are lost (if lives are enabled) or every square matches the known solution.
 - **Settings** (gear icon at the top right) lets you toggle the three-life limit (`♥` vs `∞`), automatic next-number selection, subtle haptic feedback, and sound volume (for subtle placement/note/completion chimes and the victory fanfare), or open the **Appearance & Themes** submenu to switch between built-in themes, save your own custom themes, or customize every appearance color (including completed digit button/text colors) via swatches, an interactive color wheel, or an exact `#RRGGBB` hex code.
-- **New** offers Easy, Medium, Hard, Expert, Extreme, and Diabolical (generated asynchronously with a loading indicator). Each generated puzzle has exactly one solution. Difficulty is based on clue count (42/36/30/26/23/17); it does not promise a particular solving-technique rating.
-- The timer, current puzzle, notes, lives, move history, and settings are saved locally. **Records** shows the best completion time for each difficulty. The timer advances while the app is active.
+- **New** offers Easy, Medium, Hard, Expert, Extreme, Diabolical, and Diabolical+. Every puzzle has exactly one solution. Easy/Medium/Hard are generated on the device by clue count (42/36/30). Expert and harder are drawn from a bundled, technique-rated bank (Sukaku Explainer rating: Expert 4.0–5.9 for wings and fish, Extreme 6.0–6.9, Diabolical 7.0–8.4 for chains, Diabolical+ 8.5+ for forcing chains). Each bank puzzle is randomly relabeled, reordered, and/or transposed, so boards rarely repeat.
+- **Hide mistakes until checked** (Settings, off by default): wrong digits are not shown in red and cost no heart while you play. Progress, number counts, and sounds count placements rather than correct cells. Tap **Check for mistakes** to reveal every wrong digit; each newly revealed one costs a heart. With this setting on, Fast complete fills only the empty cells.
+- The timer, current puzzle, notes, lives, move history, and settings are saved locally. **Records** shows the best completion time for each difficulty. (Updating to the rated bank resets the old Expert, Extreme, and Diabolical records once, because those levels changed.) The timer advances while the app is active.
 
 ## Build
 
@@ -48,3 +49,7 @@ For the next release, increment `versionCode` (it must increase for Android upgr
 ## Tests
 
 `./gradlew :app:testDebugUnitTest` checks unique puzzle generation, game rules, move history, fast pencil, win/loss, and save restoration. `./gradlew :app:lintDebug` runs Android lint. `./gradlew :app:assembleDebug` compiles and packages the Android app. The project uses Gradle 8.10.2, Android Gradle Plugin 8.7.3, Kotlin 2.0.21, and Compose Material 3.
+
+## Puzzle credits
+
+Expert through Diabolical+ puzzles come from the [Sudoku Exchange Puzzle Bank](https://github.com/grantm/sudoku-exchange-puzzle-bank) by Grant McLean, which is dedicated to the public domain (Unlicense). The puzzles were generated with QQWing and rated with Sukaku Explainer. `scripts/build_puzzle_bank.py` rebuilds the bundled files reproducibly.

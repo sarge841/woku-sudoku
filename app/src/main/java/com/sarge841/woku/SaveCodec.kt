@@ -21,16 +21,24 @@ object SaveCodec {
     }
     private fun stack(items: List<BoardSnapshot>) = items.joinToString("~") { snapshot(it) }
     private fun parseStack(s: String) = if (s.isEmpty()) emptyList() else s.split("~").map(::parseSnapshot)
+    private fun revealed(map: Map<Int, Int>) = map.entries.sortedBy { it.key }.joinToString(",") { "${it.key}:${it.value}" }
+    private fun parseRevealed(s: String): Map<Int, Int> = if (s.isEmpty()) emptyMap() else s.split(",").associate { entry ->
+        val (cell, digit) = entry.split(":").map { it.toInt() }
+        require(cell in 0..80 && digit in 1..9)
+        cell to digit
+    }
 
+    /** Version 2 appends revealed mistakes (hide-mistakes mode); version 1 saves still decode. */
     fun encode(game: GameState): String = listOf(
-        "1", game.difficulty.name, game.lives.toString(), game.elapsedSeconds.toString(),
+        "2", game.difficulty.name, game.lives.toString(), game.elapsedSeconds.toString(),
         digits(game.puzzle.givens), digits(game.puzzle.solution),
-        snapshot(BoardSnapshot(game.values, game.notes)), stack(game.history), stack(game.future)
+        snapshot(BoardSnapshot(game.values, game.notes)), stack(game.history), stack(game.future),
+        revealed(game.revealedMistakes)
     ).joinToString("|")
 
     fun decode(save: String): GameState? = runCatching {
-        val p = save.split("|", limit = 10)
-        require(p.size == 9 && p[0] == "1")
+        val p = save.split("|", limit = 11)
+        require((p.size == 9 && p[0] == "1") || (p.size == 10 && p[0] == "2"))
         val difficulty = Difficulty.valueOf(p[1])
         val lives = p[2].toInt().also { require(it in 0..3) }
         val seconds = p[3].toInt().also { require(it >= 0) }
@@ -40,6 +48,7 @@ object SaveCodec {
         val current = parseSnapshot(p[6])
         require(givens.indices.all { givens[it] == 0 || current.values[it] == givens[it] })
         GameState(Puzzle(givens, solution), difficulty, current.values, current.notes,
-            lives, seconds, parseStack(p[7]), parseStack(p[8]))
+            lives, seconds, parseStack(p[7]), parseStack(p[8]),
+            if (p.size == 10) parseRevealed(p[9]) else emptyMap())
     }.getOrNull()
 }

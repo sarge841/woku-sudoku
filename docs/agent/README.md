@@ -16,7 +16,8 @@ The default branch is `main`; the package/application ID is `com.sarge841.woku`.
 
 | Area | File | Responsibility |
 |---|---|---|
-| Puzzle engine | `app/src/main/java/com/sarge841/woku/Sudoku.kt` | Generate solved boards, remove clues while checking uniqueness, calculate candidates, count solutions. |
+| Puzzle engine | `app/src/main/java/com/sarge841/woku/Sudoku.kt` | Generate Easy–Hard boards by clue removal with uniqueness checks; load and transform rated bank puzzles (`PuzzleBank`) for Expert+; candidates; solution counting. |
+| Puzzle bank data | `app/src/main/resources/com/sarge841/woku/puzzles/*.txt`, `scripts/build_puzzle_bank.py` | Public-domain, Sukaku-Explainer-rated puzzles (`<81 digits> <rating>` per line); regenerate only with the script. |
 | Game rules | `app/src/main/java/com/sarge841/woku/GameState.kt` | Immutable board values/notes, three lives, status, undo/redo, timer ticks. |
 | Save codec | `app/src/main/java/com/sarge841/woku/SaveCodec.kt` | Versioned, Android-independent text representation of game state and history. |
 | UI and local storage | `app/src/main/java/com/sarge841/woku/MainActivity.kt` | Compose screen, input/highlighting, dialogs, SharedPreferences save and best times. |
