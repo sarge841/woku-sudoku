@@ -2,13 +2,35 @@ package com.sarge841.woku
 
 enum class GameStatus { PLAYING, WON, LOST }
 
-data class BoardSnapshot(val values: List<Int>, val notes: List<Set<Int>>)
+enum class LineStyle { SOLID, DOTTED }
+
+data class BoardLine(val from: Int, val to: Int, val style: LineStyle = LineStyle.SOLID)
+
+val ANNOTATION_COLORS = listOf(
+    0xFFFF5252, // 1: Red / Coral
+    0xFFFF9800, // 2: Orange
+    0xFFFFEB3B, // 3: Yellow
+    0xFF4CAF50, // 4: Green
+    0xFF00BCD4, // 5: Cyan
+    0xFF2196F3, // 6: Blue
+    0xFF9C27B0, // 7: Purple
+    0xFFE91E63  // 8: Pink
+)
+
+data class BoardSnapshot(
+    val values: List<Int>,
+    val notes: List<Set<Int>>,
+    val cellColors: Map<Int, Int> = emptyMap(),
+    val lines: Set<BoardLine> = emptySet()
+)
 
 data class GameState(
     val puzzle: Puzzle,
     val difficulty: Difficulty,
     val values: List<Int>,
     val notes: List<Set<Int>>,
+    val cellColors: Map<Int, Int> = emptyMap(),
+    val lines: Set<BoardLine> = emptySet(),
     val lives: Int = 3,
     val elapsedSeconds: Int = 0,
     val history: List<BoardSnapshot> = emptyList(),
@@ -78,9 +100,22 @@ data class GameState(
         return copy(lives = newLives, revealedMistakes = wrong.associateWith { values[it] })
     }
 
-    private fun changed(newValues: List<Int>, newNotes: List<Set<Int>>, newLives: Int = lives): GameState =
-        copy(values = newValues, notes = newNotes, lives = newLives,
-            history = (history + BoardSnapshot(values, notes)).takeLast(200), future = emptyList())
+    private fun changed(
+        newValues: List<Int> = values,
+        newNotes: List<Set<Int>> = notes,
+        newCellColors: Map<Int, Int> = cellColors,
+        newLines: Set<BoardLine> = lines,
+        newLives: Int = lives
+    ): GameState =
+        copy(
+            values = newValues,
+            notes = newNotes,
+            cellColors = newCellColors,
+            lines = newLines,
+            lives = newLives,
+            history = (history + BoardSnapshot(values, notes, cellColors, lines)).takeLast(200),
+            future = emptyList()
+        )
 
     fun place(index: Int, digit: Int, livesEnabled: Boolean = true, hideMistakes: Boolean = false): GameState {
         if (status(livesEnabled) != GameStatus.PLAYING || index !in 0..80 || digit !in 0..9 || puzzle.givens[index] != 0 || values[index] == digit) return this
@@ -94,14 +129,14 @@ data class GameState(
             }
         }
         val life = if (livesEnabled && !hideMistakes && digit != 0 && digit != puzzle.solution[index]) (lives - 1).coerceAtLeast(0) else lives
-        return changed(newValues, newNotes, life)
+        return changed(newValues = newValues, newNotes = newNotes, newLives = life)
     }
 
     /** Fills the board with the solution. With [hideMistakes], only empty cells are filled (wrong entries stay). */
     fun fastComplete(livesEnabled: Boolean = true, hideMistakes: Boolean = false): GameState {
         if (!canFastComplete(livesEnabled, hideMistakes)) return this
         val filled = if (hideMistakes) values.indices.map { if (values[it] == 0) puzzle.solution[it] else values[it] } else puzzle.solution
-        return changed(filled, List(81) { emptySet() })
+        return changed(newValues = filled, newNotes = List(81) { emptySet() })
     }
 
     fun toggleNote(
@@ -113,27 +148,91 @@ data class GameState(
         if (status(livesEnabled) != GameStatus.PLAYING || index !in 0..80 || digit !in 1..9 || values[index] != 0) return this
         val newNotes = notes.toMutableList()
         newNotes[index] = if (digit in notes[index]) notes[index] - digit else notes[index] + digit
-        return if (recordHistory) changed(values, newNotes) else copy(notes = newNotes)
+        return if (recordHistory) changed(newNotes = newNotes) else copy(notes = newNotes)
+    }
+
+    fun setColor(index: Int, colorIndex: Int, livesEnabled: Boolean = true): GameState {
+        if (status(livesEnabled) != GameStatus.PLAYING || index !in 0..80) return this
+        val currentColor = cellColors[index]
+        val newColors = if (currentColor == colorIndex || colorIndex == 0) {
+            cellColors - index
+        } else {
+            cellColors + (index to colorIndex)
+        }
+        if (newColors == cellColors) return this
+        return changed(newCellColors = newColors)
+    }
+
+    fun toggleLine(from: Int, to: Int, style: LineStyle, livesEnabled: Boolean = true): GameState {
+        if (status(livesEnabled) != GameStatus.PLAYING || from !in 0..80 || to !in 0..80 || from == to) return this
+        val a = minOf(from, to)
+        val b = maxOf(from, to)
+        val existing = lines.firstOrNull { it.from == a && it.to == b }
+        val newLines = if (existing == null) {
+            lines + BoardLine(a, b, style)
+        } else if (existing.style != style) {
+            lines - existing + BoardLine(a, b, style)
+        } else {
+            lines - existing
+        }
+        if (newLines == lines) return this
+        return changed(newLines = newLines)
+    }
+
+    fun clearAllCellColors(livesEnabled: Boolean = true): GameState {
+        if (status(livesEnabled) != GameStatus.PLAYING || cellColors.isEmpty()) return this
+        return changed(newCellColors = emptyMap())
+    }
+
+    fun clearAllLines(livesEnabled: Boolean = true): GameState {
+        if (status(livesEnabled) != GameStatus.PLAYING || lines.isEmpty()) return this
+        return changed(newLines = emptySet())
+    }
+
+    fun clearCellAnnotations(index: Int, livesEnabled: Boolean = true): GameState {
+        if (status(livesEnabled) != GameStatus.PLAYING || index !in 0..80) return this
+        val newColors = cellColors - index
+        val newLines = lines.filterNot { it.from == index || it.to == index }.toSet()
+        if (newColors == cellColors && newLines == lines) return this
+        return changed(newCellColors = newColors, newLines = newLines)
+    }
+
+    fun clearAllAnnotations(livesEnabled: Boolean = true): GameState {
+        if (status(livesEnabled) != GameStatus.PLAYING) return this
+        if (cellColors.isEmpty() && lines.isEmpty()) return this
+        return changed(newCellColors = emptyMap(), newLines = emptySet())
     }
 
     fun fastPencil(livesEnabled: Boolean = true): GameState {
         if (status(livesEnabled) != GameStatus.PLAYING) return this
         val updated = values.indices.map { Sudoku.candidates(values, it) }
-        return if (updated == notes) this else changed(values, updated)
+        return if (updated == notes) this else changed(newNotes = updated)
     }
 
     fun undo(livesEnabled: Boolean = true): GameState {
         if (status(livesEnabled) != GameStatus.PLAYING || history.isEmpty()) return this
         val prior = history.last()
-        return copy(values = prior.values, notes = prior.notes, history = history.dropLast(1),
-            future = future + BoardSnapshot(values, notes))
+        return copy(
+            values = prior.values,
+            notes = prior.notes,
+            cellColors = prior.cellColors,
+            lines = prior.lines,
+            history = history.dropLast(1),
+            future = future + BoardSnapshot(values, notes, cellColors, lines)
+        )
     }
 
     fun redo(livesEnabled: Boolean = true): GameState {
         if (status(livesEnabled) != GameStatus.PLAYING || future.isEmpty()) return this
         val next = future.last()
-        return copy(values = next.values, notes = next.notes, future = future.dropLast(1),
-            history = history + BoardSnapshot(values, notes))
+        return copy(
+            values = next.values,
+            notes = next.notes,
+            cellColors = next.cellColors,
+            lines = next.lines,
+            future = future.dropLast(1),
+            history = history + BoardSnapshot(values, notes, cellColors, lines)
+        )
     }
 
     fun tick(livesEnabled: Boolean = true): GameState =
@@ -145,11 +244,16 @@ data class GameState(
     }
 }
 
+enum class SelectionMode { DIGIT, COLOR, LINE }
+
 data class SelectionState(
     val selectedCell: Int? = null,
     val selectedDigit: Int? = null,
     val pencil: Boolean = false,
-    val viewOnly: Boolean = false
+    val viewOnly: Boolean = false,
+    val mode: SelectionMode = SelectionMode.DIGIT,
+    val selectedColor: Int = 1,
+    val lineStyle: LineStyle = LineStyle.SOLID
 ) {
     fun onCellTap(
         game: GameState,
@@ -158,6 +262,21 @@ data class SelectionState(
         autoAdvanceDigit: Boolean = true,
         hideMistakes: Boolean = false
     ): Pair<GameState, SelectionState> {
+        if (mode == SelectionMode.COLOR) {
+            val nextGame = game.setColor(index, selectedColor, livesEnabled)
+            return nextGame to copy(selectedCell = index)
+        }
+        if (mode == SelectionMode.LINE) {
+            val from = selectedCell
+            return if (from == null) {
+                game to copy(selectedCell = index)
+            } else if (from == index) {
+                game to copy(selectedCell = null)
+            } else {
+                val nextGame = game.toggleLine(from, index, lineStyle, livesEnabled)
+                nextGame to copy(selectedCell = null)
+            }
+        }
         val placed = game.values.getOrNull(index) ?: 0
         if (placed != 0) {
             return game to copy(selectedCell = index, selectedDigit = placed)
@@ -186,6 +305,7 @@ data class SelectionState(
         firstCellInGesture: Boolean,
         livesEnabled: Boolean = true
     ): Pair<GameState, SelectionState> {
+        if (mode != SelectionMode.DIGIT) return game to this
         if (!pencil || viewOnly) return game to this
         val digit = selectedDigit ?: return game to copy(selectedCell = index)
         if (game.values.getOrNull(index) != 0) return game to this
@@ -203,6 +323,9 @@ data class SelectionState(
 
     fun toggleViewOnly(): SelectionState =
         if (viewOnly) copy(viewOnly = false) else copy(viewOnly = true, pencil = false)
+
+    fun setMode(newMode: SelectionMode): SelectionState =
+        if (mode == newMode) copy(mode = SelectionMode.DIGIT, selectedCell = null) else copy(mode = newMode, selectedCell = null)
 }
 
 enum class ColorSlot(val label: String, val defaultArgb: Long, val options: List<Long>) {
@@ -218,7 +341,8 @@ enum class ColorSlot(val label: String, val defaultArgb: Long, val options: List
     COMPLETED_DIGIT_TEXT("Completed digit text", 0xFF4B565E, listOf(0xFF4B565E, 0xFF424242, 0xFF5D5370, 0xFF4A6158, 0xFF665A4F, 0xFF546470)),
     INK("Given numbers & text", 0xFFE7ECEF, listOf(0xFFE7ECEF, 0xFFFFFFFF, 0xFFF3E5F5, 0xFFE8F5E9, 0xFFFFF3E0, 0xFFCFD8DC)),
     MUTED("Notes & secondary text", 0xFF87949D, listOf(0xFF87949D, 0xFF9E9E9E, 0xFFA396B8, 0xFF88A69B, 0xFFA8988A, 0xFF90A4AE)),
-    DANGER("Mistakes & hearts", 0xFFFF8189, listOf(0xFFFF8189, 0xFFFF5252, 0xFFFFAB40, 0xFFFF4081, 0xFFE040FB, 0xFFFF6E40))
+    DANGER("Mistakes & hearts", 0xFFFF8189, listOf(0xFFFF8189, 0xFFFF5252, 0xFFFFAB40, 0xFFFF4081, 0xFFE040FB, 0xFFFF6E40)),
+    ANNOTATION_LINE("Connecting lines", 0xFF75DCC7, listOf(0xFF75DCC7, 0xFFFF5252, 0xFFFFB74D, 0xFFFFEB3B, 0xFF81C784, 0xFF64B5F6, 0xFFB388FF, 0xFFFFFFFF))
 }
 
 data class ThemePalette(
@@ -285,7 +409,8 @@ data class SavedTheme(
                         ColorSlot.COMPLETED_DIGIT_TEXT to 0xFF465C75,
                         ColorSlot.INK to 0xFFE6F0FA,
                         ColorSlot.MUTED to 0xFF849BB5,
-                        ColorSlot.DANGER to 0xFFFF6E7A
+                        ColorSlot.DANGER to 0xFFFF6E7A,
+                        ColorSlot.ANNOTATION_LINE to 0xFF64B5F6
                     )
                 ),
                 builtIn = true
@@ -306,7 +431,8 @@ data class SavedTheme(
                         ColorSlot.COMPLETED_DIGIT_TEXT to 0xFF5D5370,
                         ColorSlot.INK to 0xFFF3E5F5,
                         ColorSlot.MUTED to 0xFF9F92B8,
-                        ColorSlot.DANGER to 0xFFFF80AB
+                        ColorSlot.DANGER to 0xFFFF80AB,
+                        ColorSlot.ANNOTATION_LINE to 0xFFB388FF
                     )
                 ),
                 builtIn = true
@@ -327,7 +453,8 @@ data class SavedTheme(
                         ColorSlot.COMPLETED_DIGIT_TEXT to 0xFF665A4F,
                         ColorSlot.INK to 0xFFFFF3E0,
                         ColorSlot.MUTED to 0xFFA8988A,
-                        ColorSlot.DANGER to 0xFFFF6E40
+                        ColorSlot.DANGER to 0xFFFF6E40,
+                        ColorSlot.ANNOTATION_LINE to 0xFFFFB74D
                     )
                 ),
                 builtIn = true
@@ -348,7 +475,8 @@ data class SavedTheme(
                         ColorSlot.COMPLETED_DIGIT_TEXT to 0xFF424E45,
                         ColorSlot.INK to 0xFFE8F5E9,
                         ColorSlot.MUTED to 0xFF7E9183,
-                        ColorSlot.DANGER to 0xFFFF5252
+                        ColorSlot.DANGER to 0xFFFF5252,
+                        ColorSlot.ANNOTATION_LINE to 0xFF81C784
                     )
                 ),
                 builtIn = true

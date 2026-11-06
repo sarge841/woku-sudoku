@@ -323,6 +323,85 @@ class GameTest {
         assertEquals("best_DIABOLICAL_PLUS", BestTimes.key(Difficulty.DIABOLICAL_PLUS))
     }
 
+    @Test fun cellColoringAndLinesCanBeToggledAndUndone() {
+        val start = game()
+        val colored = start.setColor(10, 3)
+        assertEquals(mapOf(10 to 3), colored.cellColors)
+        val toggledSameColor = colored.setColor(10, 3)
+        assertEquals(emptyMap<Int, Int>(), toggledSameColor.cellColors)
+
+        val withLine = start.toggleLine(10, 20, LineStyle.SOLID)
+        assertEquals(setOf(BoardLine(10, 20, LineStyle.SOLID)), withLine.lines)
+        val styleSwapped = withLine.toggleLine(20, 10, LineStyle.DOTTED)
+        assertEquals(setOf(BoardLine(10, 20, LineStyle.DOTTED)), styleSwapped.lines)
+        val toggledOff = styleSwapped.toggleLine(10, 20, LineStyle.DOTTED)
+        assertEquals(emptySet<BoardLine>(), toggledOff.lines)
+
+        // Undo / redo on coloring & lines
+        val step1 = start.setColor(5, 1)
+        val step2 = step1.toggleLine(5, 6, LineStyle.SOLID)
+        assertEquals(step1.cellColors, step2.undo().cellColors)
+        assertEquals(step1.lines, step2.undo().lines)
+        assertEquals(step2.cellColors, step2.undo().redo().cellColors)
+        assertEquals(step2.lines, step2.undo().redo().lines)
+
+        // Clear cell annotations
+        val cleared = step2.clearCellAnnotations(5)
+        assertEquals(emptyMap<Int, Int>(), cleared.cellColors)
+        assertEquals(emptySet<BoardLine>(), cleared.lines)
+
+        // Clear all annotations
+        val multiple = start.setColor(1, 2).setColor(2, 3).toggleLine(1, 2, LineStyle.SOLID)
+        val clearedAll = multiple.clearAllAnnotations()
+        assertEquals(emptyMap<Int, Int>(), clearedAll.cellColors)
+        assertEquals(emptySet<BoardLine>(), clearedAll.lines)
+        assertEquals(multiple.cellColors, clearedAll.undo().cellColors)
+        assertEquals(multiple.lines, clearedAll.undo().lines)
+
+        // Clear all cell colors only
+        val clearedColorsOnly = multiple.clearAllCellColors()
+        assertEquals(emptyMap<Int, Int>(), clearedColorsOnly.cellColors)
+        assertEquals(multiple.lines, clearedColorsOnly.lines)
+        assertEquals(multiple.cellColors, clearedColorsOnly.undo().cellColors)
+
+        // Clear all lines only
+        val clearedLinesOnly = multiple.clearAllLines()
+        assertEquals(multiple.cellColors, clearedLinesOnly.cellColors)
+        assertEquals(emptySet<BoardLine>(), clearedLinesOnly.lines)
+        assertEquals(multiple.lines, clearedLinesOnly.undo().lines)
+    }
+
+    @Test fun lineModePairSelectionConnectsAndResetsSelectionForNextLine() {
+        val start = game()
+        val lineMode = SelectionState(mode = SelectionMode.LINE)
+
+        // Tap first cell (start of line)
+        val (g1, s1) = lineMode.onCellTap(start, 10)
+        assertEquals(emptySet<BoardLine>(), g1.lines)
+        assertEquals(10, s1.selectedCell)
+
+        // Tapping the same cell cancels/deselects start cell
+        val (gCancel, sCancel) = s1.onCellTap(g1, 10)
+        assertEquals(emptySet<BoardLine>(), gCancel.lines)
+        assertNull(sCancel.selectedCell)
+
+        // Tap start cell again, then tap end cell
+        val (_, sStart) = lineMode.onCellTap(start, 10)
+        assertEquals(10, sStart.selectedCell)
+        val (gLine, sEnd) = sStart.onCellTap(start, 20)
+        assertEquals(setOf(BoardLine(10, 20, LineStyle.SOLID)), gLine.lines)
+        // Selection is reset to null so the next tap starts a new line instead of chaining
+        assertNull(sEnd.selectedCell)
+
+        // Next tap starts an independent line at cell 30
+        val (g3, s3) = sEnd.onCellTap(gLine, 30)
+        assertEquals(gLine.lines, g3.lines)
+        assertEquals(30, s3.selectedCell)
+        val (g4, s4) = s3.onCellTap(g3, 40)
+        assertEquals(setOf(BoardLine(10, 20, LineStyle.SOLID), BoardLine(30, 40, LineStyle.SOLID)), g4.lines)
+        assertNull(s4.selectedCell)
+    }
+
     @Test fun settingsKeepHideMistakesOffByDefaultAndRoundTripIt() {
         assertFalse(AppSettings().hideMistakesUntilChecked)
         assertTrue(AppSettings().keepScreenOn)

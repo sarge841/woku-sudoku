@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -34,6 +35,7 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalView
@@ -206,6 +208,7 @@ class MainActivity : ComponentActivity() {
             }
             var selection by remember { mutableStateOf(SelectionState()) }
             var showNew by remember { mutableStateOf(false) }
+            var showDifficultyGuide by remember { mutableStateOf(false) }
             var showBest by remember { mutableStateOf(false) }
             var showSettings by remember { mutableStateOf(false) }
             var showAppearance by remember { mutableStateOf(false) }
@@ -276,6 +279,8 @@ class MainActivity : ComponentActivity() {
                     pencil = selection.pencil,
                     viewOnly = selection.viewOnly,
                     best = prefs.getInt(BestTimes.key(game.difficulty), Int.MAX_VALUE).takeUnless { it == Int.MAX_VALUE },
+                    selection = selection,
+                    onSelectionChange = { selection = it },
                     onCell = { index ->
                         val hide = settings.hideMistakesUntilChecked
                         val prevGame = game
@@ -368,10 +373,25 @@ class MainActivity : ComponentActivity() {
                         view.tickHaptic(settings.hapticsEnabled, strong = found > 0)
                     },
                     onErase = {
-                        selection.selectedCell?.let {
-                            update(game.place(it, 0, settings.livesEnabled))
+                        val cell = selection.selectedCell
+                        if (cell != null) {
+                            if (selection.mode == SelectionMode.COLOR) {
+                                update(game.setColor(cell, 0, settings.livesEnabled))
+                            } else if (selection.mode == SelectionMode.LINE) {
+                                update(game.clearCellAnnotations(cell, settings.livesEnabled))
+                            } else {
+                                update(game.place(cell, 0, settings.livesEnabled))
+                            }
                             view.tickHaptic(settings.hapticsEnabled)
                         }
+                    },
+                    onClearColors = {
+                        update(game.clearAllCellColors(settings.livesEnabled))
+                        view.tickHaptic(settings.hapticsEnabled)
+                    },
+                    onClearLines = {
+                        update(game.clearAllLines(settings.livesEnabled))
+                        view.tickHaptic(settings.hapticsEnabled)
                     },
                     onUndo = {
                         update(game.undo(settings.livesEnabled))
@@ -387,18 +407,41 @@ class MainActivity : ComponentActivity() {
                 )
                 if (showNew) AlertDialog(
                     onDismissRequest = { showNew = false },
-                    title = { Text("New puzzle") },
+                    title = {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("New puzzle", color = inkColor)
+                            IconButton(
+                                onClick = { showDifficultyGuide = true },
+                                modifier = Modifier.size(32.dp)
+                            ) {
+                                Icon(
+                                    Icons.Outlined.Info,
+                                    contentDescription = "Difficulty guide",
+                                    tint = accentColor,
+                                    modifier = Modifier.size(24.dp)
+                                )
+                            }
+                        }
+                    },
                     text = {
                         Column {
                             Difficulty.entries.forEach { level ->
                                 TextButton(
                                     onClick = { showNew = false; pendingNew = level },
                                     modifier = Modifier.fillMaxWidth()
-                                ) { Text(level.label) }
+                                ) { Text(level.label, color = inkColor) }
                             }
                         }
                     },
-                    confirmButton = { TextButton(onClick = { showNew = false }) { Text("Cancel") } }
+                    confirmButton = { TextButton(onClick = { showNew = false }) { Text("Cancel", color = accentColor) } }
+                )
+                if (showDifficultyGuide) DifficultyGuideDialog(
+                    palette = palette,
+                    onDismiss = { showDifficultyGuide = false }
                 )
                 pendingNew?.let { level ->
                     AlertDialog(
@@ -500,6 +543,8 @@ private fun formatTime(seconds: Int) = "%02d:%02d".format(seconds / 60, seconds 
 private fun SudokuScreen(
     game: GameState,
     settings: AppSettings,
+    selection: SelectionState,
+    onSelectionChange: (SelectionState) -> Unit,
     selectedCell: Int?,
     selectedDigit: Int?,
     pencil: Boolean,
@@ -516,6 +561,8 @@ private fun SudokuScreen(
     checkMessage: String?,
     onCheck: () -> Unit,
     onErase: () -> Unit,
+    onClearColors: () -> Unit,
+    onClearLines: () -> Unit,
     onUndo: () -> Unit,
     onRedo: () -> Unit,
     onNew: () -> Unit,
@@ -573,12 +620,13 @@ private fun SudokuScreen(
             palette = palette,
             selectedCell = selectedCell,
             selectedDigit = selectedDigit,
-            pencilDragEnabled = pencil && !viewOnly && selectedDigit != null && playing,
+            selectionMode = selection.mode,
+            pencilDragEnabled = pencil && !viewOnly && selectedDigit != null && playing && selection.mode == SelectionMode.DIGIT,
             hideMistakes = hideMistakes,
             onCell = onCell,
             onPencilDragCell = onPencilDragCell
         )
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(14.dp))
         if (!playing) {
             Text(
                 if (status == GameStatus.WON) "Puzzle complete!" else "No lives left — try another puzzle",
@@ -591,76 +639,158 @@ private fun SudokuScreen(
                     hideMistakes && checkMessage != null -> checkMessage
                     hideMistakes && game.emptyCount == 0 -> "BOARD FULL  ·  TAP CHECK TO FIND MISTAKES"
                     viewOnly -> "VIEW ONLY MODE"
+                    selection.mode == SelectionMode.COLOR -> "COLOR MODE  ·  TAP CELLS TO TINT WITH CIRCLE"
+                    selection.mode == SelectionMode.LINE ->
+                        if (selection.selectedCell == null) "LINE MODE  ·  TAP FIRST CELL TO START LINE"
+                        else "LINE MODE  ·  TAP SECOND CELL TO COMPLETE LINE"
                     pencil -> "PENCIL MODE  ·  TAP OR DRAG TO TOGGLE NOTES"
                     else -> "SELECT A NUMBER THEN TAP A CELL"
                 },
                 color = when {
                     hideMistakes && (checkMessage != null || game.emptyCount == 0) ->
                         if (game.revealedMistakes.isEmpty() && checkMessage != null) accentColor else dangerColor
-                    viewOnly || pencil -> accentColor
+                    viewOnly || pencil || selection.mode != SelectionMode.DIGIT -> accentColor
                     else -> mutedColor
                 },
                 fontSize = 11.sp,
                 letterSpacing = 1.5.sp
             )
         }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(10.dp))
         val completedDigitSurface = palette.color(ColorSlot.COMPLETED_DIGIT_SURFACE)
         val completedDigitText = palette.color(ColorSlot.COMPLETED_DIGIT_TEXT)
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-            (1..9).forEach { digit ->
-                val active = selectedDigit == digit
-                val completed = game.isDigitComplete(digit, hideMistakes)
-                val remaining = (9 - game.digitCount(digit, hideMistakes)).coerceAtLeast(0)
-                val buttonBg = when {
-                    active -> accentColor
-                    completed -> completedDigitSurface
-                    else -> surfaceColor
+        when (selection.mode) {
+            SelectionMode.DIGIT -> {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                    (1..9).forEach { digit ->
+                        val active = selectedDigit == digit
+                        val completed = game.isDigitComplete(digit, hideMistakes)
+                        val remaining = (9 - game.digitCount(digit, hideMistakes)).coerceAtLeast(0)
+                        val buttonBg = when {
+                            active -> accentColor
+                            completed -> completedDigitSurface
+                            else -> surfaceColor
+                        }
+                        val mainTextColor = when {
+                            active -> bgColor
+                            completed -> completedDigitText
+                            else -> inkColor
+                        }
+                        val subTextColor = when {
+                            active -> bgColor
+                            completed -> completedDigitText
+                            else -> mutedColor
+                        }
+                        Column(
+                            Modifier
+                                .weight(1f)
+                                .background(buttonBg, RoundedCornerShape(8.dp))
+                                .combinedClickable(
+                                    onClick = { onDigit(digit) },
+                                    onLongClick = { onDigitLongPress(digit) }
+                                )
+                                .padding(vertical = 9.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text("$digit", color = mainTextColor, fontSize = 23.sp, fontWeight = FontWeight.Medium)
+                            Text("$remaining", color = subTextColor, fontSize = 10.sp)
+                        }
+                    }
                 }
-                val mainTextColor = when {
-                    active -> bgColor
-                    completed -> completedDigitText
-                    else -> inkColor
-                }
-                val subTextColor = when {
-                    active -> bgColor
-                    completed -> completedDigitText
-                    else -> mutedColor
-                }
-                Column(
-                    Modifier
-                        .weight(1f)
-                        .background(buttonBg, RoundedCornerShape(8.dp))
-                        .combinedClickable(
-                            onClick = { onDigit(digit) },
-                            onLongClick = { onDigitLongPress(digit) }
-                        )
-                        .padding(vertical = 9.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
+            }
+            SelectionMode.COLOR -> {
+                Row(
+                    Modifier.fillMaxWidth().height(48.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("$digit", color = mainTextColor, fontSize = 23.sp, fontWeight = FontWeight.Medium)
-                    Text("$remaining", color = subTextColor, fontSize = 10.sp)
+                    ANNOTATION_COLORS.forEachIndexed { i, colorValue ->
+                        val colorIdx = i + 1
+                        val active = selection.selectedColor == colorIdx
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(surfaceColor)
+                                .clickable { onSelectionChange(selection.copy(selectedColor = colorIdx)) }
+                                .padding(4.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Box(
+                                Modifier
+                                    .size(24.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(colorValue))
+                                    .border(
+                                        if (active) 2.5.dp else 0.dp,
+                                        if (active) inkColor else Color.Transparent,
+                                        CircleShape
+                                    )
+                            )
+                        }
+                    }
+                    ActionButton(
+                        label = "Clear",
+                        enabled = game.cellColors.isNotEmpty() && playing,
+                        action = onClearColors,
+                        modifier = Modifier.weight(1.8f),
+                        palette = palette
+                    )
+                }
+            }
+            SelectionMode.LINE -> {
+                Row(
+                    Modifier.fillMaxWidth().height(48.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    ActionButton(
+                        label = "Solid Line",
+                        enabled = true,
+                        action = { onSelectionChange(selection.copy(lineStyle = LineStyle.SOLID)) },
+                        modifier = Modifier.weight(1.2f),
+                        palette = palette,
+                        active = selection.lineStyle == LineStyle.SOLID
+                    )
+                    ActionButton(
+                        label = "Dotted Line",
+                        enabled = true,
+                        action = { onSelectionChange(selection.copy(lineStyle = LineStyle.DOTTED)) },
+                        modifier = Modifier.weight(1.2f),
+                        palette = palette,
+                        active = selection.lineStyle == LineStyle.DOTTED
+                    )
+                    ActionButton(
+                        label = "Clear",
+                        enabled = game.lines.isNotEmpty() && playing,
+                        action = onClearLines,
+                        modifier = Modifier.weight(1.2f),
+                        palette = palette
+                    )
                 }
             }
         }
-        Spacer(Modifier.height(18.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Spacer(Modifier.height(14.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             ActionButton("Undo", game.history.isNotEmpty() && playing, onUndo, Modifier.weight(1f), palette)
             ActionButton("Redo", game.future.isNotEmpty() && playing, onRedo, Modifier.weight(1f), palette)
             ActionButton("Erase", !viewOnly && selectedCell != null && playing, onErase, Modifier.weight(1f), palette)
+            ActionButton("Color", playing, { onSelectionChange(selection.setMode(SelectionMode.COLOR)) }, Modifier.weight(1f), palette, active = selection.mode == SelectionMode.COLOR)
+            ActionButton("Line", playing, { onSelectionChange(selection.setMode(SelectionMode.LINE)) }, Modifier.weight(1f), palette, active = selection.mode == SelectionMode.LINE)
         }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(6.dp))
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             ActionButton(if (viewOnly) "View ON" else "View only", playing, onViewOnly, Modifier.weight(1f), palette, active = viewOnly)
             ActionButton(if (pencil) "Pencil ON" else "Pencil", playing, onPencil, Modifier.weight(1f), palette, active = pencil)
             ActionButton("Fast pencil", !viewOnly && playing, onFastPencil, Modifier.weight(1f), palette)
         }
         if (hideMistakes) {
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(6.dp))
             ActionButton("Check for mistakes", playing, onCheck, Modifier.fillMaxWidth(), palette)
         }
         if (game.canFastComplete(settings.livesEnabled, hideMistakes)) {
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(6.dp))
             ActionButton("Fast complete (${game.fastCompleteCount(hideMistakes)} left)", true, onFastComplete, Modifier.fillMaxWidth(), palette, active = true)
         }
     }
@@ -696,6 +826,7 @@ private fun SudokuGrid(
     palette: ThemePalette,
     selectedCell: Int?,
     selectedDigit: Int?,
+    selectionMode: SelectionMode,
     pencilDragEnabled: Boolean,
     hideMistakes: Boolean,
     onCell: (Int) -> Unit,
@@ -711,6 +842,7 @@ private fun SudokuGrid(
     val inkColor = palette.color(ColorSlot.INK)
     val mutedColor = palette.color(ColorSlot.MUTED)
     val dangerColor = palette.color(ColorSlot.DANGER)
+    val lineColor = palette.color(ColorSlot.ANNOTATION_LINE)
 
     val currentGame by rememberUpdatedState(game)
     val currentDragEnabled by rememberUpdatedState(pencilDragEnabled)
@@ -721,7 +853,7 @@ private fun SudokuGrid(
         Modifier
             .fillMaxWidth()
             .border(2.dp, accentColor)
-            .pointerInput(Unit) {
+            .pointerInput(selectionMode, pencilDragEnabled) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     fun cellAt(pos: Offset): Int? {
@@ -802,6 +934,8 @@ private fun SudokuGrid(
             }
     ) {
         val size = maxWidth / 9
+
+        // Layer 1: Cell backgrounds (selection, peer highlights, and color circle annotations)
         Column {
             for (row in 0..8) Row {
                 for (col in 0..8) {
@@ -817,10 +951,59 @@ private fun SudokuGrid(
                         peer -> peerHighlightColor
                         else -> surfaceColor
                     }
+                    val cellColorIdx = game.cellColors[index]
                     Box(
                         Modifier
                             .size(size)
                             .background(shade),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        if (cellColorIdx != null && cellColorIdx in 1..ANNOTATION_COLORS.size) {
+                            Box(
+                                Modifier
+                                    .size(size * 0.85f)
+                                    .clip(CircleShape)
+                                    .background(Color(ANNOTATION_COLORS[cellColorIdx - 1]).copy(alpha = 0.35f))
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Layer 2: Connecting lines (in the background behind numbers and notes)
+        Canvas(Modifier.matchParentSize()) {
+            val cellWidth = this.size.width / 9f
+            val cellHeight = this.size.height / 9f
+            for (line in currentGame.lines) {
+                val fromRow = line.from / 9
+                val fromCol = line.from % 9
+                val toRow = line.to / 9
+                val toCol = line.to % 9
+                val startOffset = Offset((fromCol + 0.5f) * cellWidth, (fromRow + 0.5f) * cellHeight)
+                val endOffset = Offset((toCol + 0.5f) * cellWidth, (toRow + 0.5f) * cellHeight)
+                val strokeWidth = 2.5.dp.toPx()
+                val pathEffect = if (line.style == LineStyle.DOTTED) {
+                    PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 4.dp.toPx()), 0f)
+                } else null
+                drawLine(
+                    color = lineColor,
+                    start = startOffset,
+                    end = endOffset,
+                    strokeWidth = strokeWidth,
+                    pathEffect = pathEffect
+                )
+            }
+        }
+
+        // Layer 3: Cell content (numbers and notes displayed above connecting lines)
+        Column {
+            for (row in 0..8) Row {
+                for (col in 0..8) {
+                    val index = row * 9 + col
+                    val value = game.values[index]
+                    Box(
+                        Modifier.size(size),
                         contentAlignment = Alignment.Center
                     ) {
                         if (value != 0) Text(
@@ -1369,4 +1552,104 @@ private fun SettingToggleRow(
         }
         Switch(checked = checked, onCheckedChange = onCheckedChange)
     }
+}
+
+@Composable
+private fun DifficultyGuideDialog(
+    palette: ThemePalette,
+    onDismiss: () -> Unit
+) {
+    val inkColor = palette.color(ColorSlot.INK)
+    val mutedColor = palette.color(ColorSlot.MUTED)
+    val accentColor = palette.color(ColorSlot.ACCENT)
+    val surfaceColor = palette.color(ColorSlot.SURFACE)
+
+    val guideItems = listOf(
+        Triple(
+            "Easy",
+            "42 clues",
+            "• Naked Singles & Hidden Singles\n• Solvable by direct scanning of rows, columns, and 3×3 boxes without pencil candidate tracking."
+        ),
+        Triple(
+            "Medium",
+            "36 clues",
+            "• Naked Pairs / Triples, Hidden Pairs\n• Locked Candidates (Pointing & Claiming lines)\n• Candidate notes help spot intersections and eliminations across regions."
+        ),
+        Triple(
+            "Hard",
+            "30 clues",
+            "• Naked / Hidden Triples & Quads\n• Box-Line Reduction\n• Requires deeper note tracking to eliminate candidates from intersecting rows and boxes."
+        ),
+        Triple(
+            "Expert",
+            "SE rating 4.0 – 5.9",
+            "• X-Wing, Swordfish, Y-Wing (XY-Wing), XYZ-Wing\n• Simple Coloring, Skyscrapers\n• Eliminates possibilities using geometric candidate alignments and wing patterns across distant cells."
+        ),
+        Triple(
+            "Extreme",
+            "SE rating 6.0 – 6.9",
+            "• W-Wing, Jellyfish, 2-String Kite\n• Alternating Inference Chains (AIC)\n• Unique Rectangles (deadly pattern avoidance)\n• Advanced conjugate pairs and loop structures."
+        ),
+        Triple(
+            "Diabolical",
+            "SE rating 7.0 – 8.4",
+            "• Multi-step AICs, Medusa 3D Coloring\n• Forcing Chains, Sue-de-Coq\n• Master-level chains linking candidate dependencies across the entire grid."
+        ),
+        Triple(
+            "Diabolical+",
+            "SE rating 8.5 – 10.0",
+            "• Dynamic Forcing Chains, Nested Chains\n• Multi-branch Contradiction Nets\n• Elite logic puzzles requiring deep branched hypothesis tracking to uncover contradictions."
+        )
+    )
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Icon(
+                    Icons.Outlined.Info,
+                    contentDescription = null,
+                    tint = accentColor,
+                    modifier = Modifier.size(24.dp)
+                )
+                Text("Difficulties & Techniques", color = inkColor)
+            }
+        },
+        text = {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                guideItems.forEach { (name, metric, techniques) ->
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .background(surfaceColor, RoundedCornerShape(8.dp))
+                            .padding(10.dp)
+                    ) {
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(name, color = accentColor, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                            Text(metric, color = mutedColor, fontSize = 11.sp)
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        Text(techniques, color = inkColor, fontSize = 12.sp, lineHeight = 16.sp)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Got it", color = accentColor)
+            }
+        }
+    )
 }
