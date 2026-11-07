@@ -18,20 +18,27 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -40,6 +47,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
@@ -215,6 +224,22 @@ class MainActivity : ComponentActivity() {
             var pendingNew by remember { mutableStateOf<Difficulty?>(null) }
             var generatingDifficulty by remember { mutableStateOf<Difficulty?>(null) }
             var checkMessage by remember { mutableStateOf<String?>(null) }
+            var isPaused by rememberSaveable { mutableStateOf(false) }
+
+            val lifecycleOwner = LocalLifecycleOwner.current
+            DisposableEffect(lifecycleOwner) {
+                val observer = LifecycleEventObserver { _, event ->
+                    if (event == Lifecycle.Event.ON_PAUSE || event == Lifecycle.Event.ON_STOP) {
+                        if (game.status(settings.livesEnabled) == GameStatus.PLAYING) {
+                            isPaused = true
+                        }
+                    }
+                }
+                lifecycleOwner.lifecycle.addObserver(observer)
+                onDispose {
+                    lifecycleOwner.lifecycle.removeObserver(observer)
+                }
+            }
 
             val palette = settings.palette
             val bgColor = palette.color(ColorSlot.BACKGROUND)
@@ -249,14 +274,16 @@ class MainActivity : ComponentActivity() {
                     if (next.elapsedSeconds < old) prefs.edit().putInt(key, next.elapsedSeconds).apply()
                     SoundEngine.play(SoundEffect.VICTORY, settings.soundVolume)
                 }
+                if (next.status(settings.livesEnabled) != GameStatus.PLAYING) isPaused = false
                 if (next.values != game.values || next.puzzle != game.puzzle) checkMessage = null
                 game = next
                 prefs.edit().putString("game", SaveCodec.encode(next)).apply()
             }
 
             val currentStatus = game.status(settings.livesEnabled)
-            LaunchedEffect(currentStatus, settings.livesEnabled) {
-                while (game.status(settings.livesEnabled) == GameStatus.PLAYING) {
+            val isAnyDialogOpen = showNew || showDifficultyGuide || showBest || showSettings || showAppearance || pendingNew != null || generatingDifficulty != null
+            LaunchedEffect(currentStatus, settings.livesEnabled, isPaused, isAnyDialogOpen) {
+                while (game.status(settings.livesEnabled) == GameStatus.PLAYING && !isPaused && !isAnyDialogOpen) {
                     delay(1000)
                     update(game.tick(settings.livesEnabled))
                 }
@@ -274,6 +301,13 @@ class MainActivity : ComponentActivity() {
                 SudokuScreen(
                     game = game,
                     settings = settings,
+                    isPaused = isPaused,
+                    onTogglePause = {
+                        if (game.status(settings.livesEnabled) == GameStatus.PLAYING) {
+                            isPaused = !isPaused
+                            view.tickHaptic(settings.hapticsEnabled)
+                        }
+                    },
                     selectedCell = selection.selectedCell,
                     selectedDigit = selection.selectedDigit,
                     pencil = selection.pencil,
@@ -281,13 +315,14 @@ class MainActivity : ComponentActivity() {
                     best = prefs.getInt(BestTimes.key(game.difficulty), Int.MAX_VALUE).takeUnless { it == Int.MAX_VALUE },
                     selection = selection,
                     onSelectionChange = { selection = it },
-                    onCell = { index ->
+                    onCell = { index, noteDigit ->
                         val hide = settings.hideMistakesUntilChecked
                         val prevGame = game
                         val placedDigit = selection.selectedDigit
                         val (nextGame, nextSelection) = selection.onCellTap(
                             game = prevGame,
                             index = index,
+                            targetDigit = noteDigit,
                             livesEnabled = settings.livesEnabled,
                             autoAdvanceDigit = settings.autoAdvanceDigit,
                             hideMistakes = hide
@@ -386,11 +421,21 @@ class MainActivity : ComponentActivity() {
                         }
                     },
                     onClearColors = {
-                        update(game.clearAllCellColors(settings.livesEnabled))
+                        val next = if (selection.annotationTarget == AnnotationTarget.NOTE) {
+                            game.clearAllNoteColors(settings.livesEnabled)
+                        } else {
+                            game.clearAllCellColors(settings.livesEnabled)
+                        }
+                        update(next)
                         view.tickHaptic(settings.hapticsEnabled)
                     },
                     onClearLines = {
-                        update(game.clearAllLines(settings.livesEnabled))
+                        val next = if (selection.annotationTarget == AnnotationTarget.NOTE) {
+                            game.clearAllNoteLines(settings.livesEnabled)
+                        } else {
+                            game.clearAllCellLines(settings.livesEnabled)
+                        }
+                        update(next)
                         view.tickHaptic(settings.hapticsEnabled)
                     },
                     onUndo = {
@@ -458,6 +503,7 @@ class MainActivity : ComponentActivity() {
                                     }
                                     update(GameState.new(generated, level))
                                     selection = selection.copy(selectedCell = null, selectedDigit = null)
+                                    isPaused = false
                                     generatingDifficulty = null
                                 }
                             }) { Text("Start") }
@@ -543,6 +589,8 @@ private fun formatTime(seconds: Int) = "%02d:%02d".format(seconds / 60, seconds 
 private fun SudokuScreen(
     game: GameState,
     settings: AppSettings,
+    isPaused: Boolean,
+    onTogglePause: () -> Unit,
     selection: SelectionState,
     onSelectionChange: (SelectionState) -> Unit,
     selectedCell: Int?,
@@ -550,7 +598,7 @@ private fun SudokuScreen(
     pencil: Boolean,
     viewOnly: Boolean,
     best: Int?,
-    onCell: (Int) -> Unit,
+    onCell: (Int, Int) -> Unit,
     onPencilDragCell: (Int, Boolean) -> Boolean,
     onDigit: (Int) -> Unit,
     onDigitLongPress: (Int) -> Unit,
@@ -577,7 +625,7 @@ private fun SudokuScreen(
     val accentColor = palette.color(ColorSlot.ACCENT)
     val dangerColor = palette.color(ColorSlot.DANGER)
     val status = game.status(settings.livesEnabled)
-    val playing = status == GameStatus.PLAYING
+    val playing = status == GameStatus.PLAYING && !isPaused
     val hideMistakes = settings.hideMistakesUntilChecked
 
     Column(
@@ -605,7 +653,33 @@ private fun SudokuScreen(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("${game.progressCount(hideMistakes)}/81", color = accentColor, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.width(12.dp))
-                Text("TIME  ${formatTime(game.elapsedSeconds)}", color = inkColor, fontSize = 14.sp)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = if (status == GameStatus.PLAYING) {
+                        Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .clickable(onClick = onTogglePause)
+                            .padding(horizontal = 4.dp, vertical = 2.dp)
+                    } else Modifier
+                ) {
+                    Text("TIME  ${formatTime(game.elapsedSeconds)}", color = if (isPaused) accentColor else inkColor, fontSize = 14.sp)
+                    if (status == GameStatus.PLAYING) {
+                        Spacer(Modifier.width(6.dp))
+                        if (isPaused) {
+                            Icon(
+                                imageVector = Icons.Filled.PlayArrow,
+                                contentDescription = "Resume timer",
+                                tint = accentColor,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        } else {
+                            PauseIcon(
+                                tint = mutedColor,
+                                modifier = Modifier.size(14.dp)
+                            )
+                        }
+                    }
+                }
             }
             Text("BEST  ${best?.let(::formatTime) ?: "—"}", color = mutedColor, fontSize = 14.sp)
             if (settings.livesEnabled) {
@@ -615,23 +689,86 @@ private fun SudokuScreen(
             }
         }
         Spacer(Modifier.height(12.dp))
-        SudokuGrid(
-            game = game,
-            palette = palette,
-            selectedCell = selectedCell,
-            selectedDigit = selectedDigit,
-            selectionMode = selection.mode,
-            pencilDragEnabled = pencil && !viewOnly && selectedDigit != null && playing && selection.mode == SelectionMode.DIGIT,
-            hideMistakes = hideMistakes,
-            onCell = onCell,
-            onPencilDragCell = onPencilDragCell
-        )
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f),
+            contentAlignment = Alignment.Center
+        ) {
+            SudokuGrid(
+                game = game,
+                palette = palette,
+                selectedCell = if (isPaused) null else selectedCell,
+                selectedDigit = if (isPaused) null else selectedDigit,
+                selection = selection,
+                pencilDragEnabled = pencil && !viewOnly && selectedDigit != null && playing && selection.mode == SelectionMode.DIGIT,
+                hideMistakes = hideMistakes,
+                onCell = if (isPaused) { _, _ -> } else onCell,
+                onPencilDragCell = if (isPaused) { _, _ -> false } else onPencilDragCell,
+                modifier = if (isPaused) Modifier.blur(16.dp) else Modifier
+            )
+            if (isPaused) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(bgColor.copy(alpha = 0.85f))
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = onTogglePause
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(56.dp)
+                                .clip(CircleShape)
+                                .background(accentColor.copy(alpha = 0.15f))
+                                .border(1.5.dp, accentColor, CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.PlayArrow,
+                                contentDescription = "Resume",
+                                tint = accentColor,
+                                modifier = Modifier.size(32.dp)
+                            )
+                        }
+                        Text(
+                            text = "PAUSED",
+                            fontSize = 26.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = inkColor,
+                            letterSpacing = 4.sp
+                        )
+                        Text(
+                            text = "Tap to resume",
+                            fontSize = 13.sp,
+                            color = mutedColor,
+                            letterSpacing = 1.sp
+                        )
+                    }
+                }
+            }
+        }
         Spacer(Modifier.height(14.dp))
-        if (!playing) {
+        if (!playing && !isPaused) {
             Text(
                 if (status == GameStatus.WON) "Puzzle complete!" else "No lives left — try another puzzle",
                 color = if (status == GameStatus.WON) accentColor else dangerColor,
                 fontSize = 16.sp
+            )
+        } else if (isPaused) {
+            Text(
+                "GAME PAUSED  ·  TAP BOARD OR PLAY TO RESUME",
+                color = accentColor,
+                fontSize = 11.sp,
+                letterSpacing = 1.5.sp
             )
         } else {
             Text(
@@ -639,10 +776,29 @@ private fun SudokuScreen(
                     hideMistakes && checkMessage != null -> checkMessage
                     hideMistakes && game.emptyCount == 0 -> "BOARD FULL  ·  TAP CHECK TO FIND MISTAKES"
                     viewOnly -> "VIEW ONLY MODE"
-                    selection.mode == SelectionMode.COLOR -> "COLOR MODE  ·  TAP CELLS TO TINT WITH CIRCLE"
+                    selection.mode == SelectionMode.COLOR ->
+                        if (selection.annotationTarget == AnnotationTarget.NOTE) {
+                            val d = selection.selectedDigit
+                            if (d != null) "COLOR NOTE $d  ·  TAP CELLS TO COLOR OR TOGGLE"
+                            else "COLOR NOTE  ·  SELECT A NUMBER THEN TAP A CELL"
+                        } else "COLOR MODE (CELL)  ·  TAP CELLS TO TINT WITH CIRCLE"
                     selection.mode == SelectionMode.LINE ->
-                        if (selection.selectedCell == null) "LINE MODE  ·  TAP FIRST CELL TO START LINE"
-                        else "LINE MODE  ·  TAP SECOND CELL TO COMPLETE LINE"
+                        if (selection.annotationTarget == AnnotationTarget.NOTE) {
+                            val startCell = selection.selectedCell
+                            val startDigit = selection.selectedLineStartDigit
+                            val curDigit = selection.selectedDigit
+                            if (startCell == null || startDigit == null) {
+                                if (curDigit != null) "LINE NOTE $curDigit  ·  TAP CELL TO START LINE"
+                                else "LINE NOTE  ·  SELECT A NUMBER THEN TAP CELL TO START"
+                            } else {
+                                if (curDigit != null) "LINE NOTE $startDigit → $curDigit  ·  TAP CELL TO CONNECT (SAME NOTE TO CANCEL)"
+                                else "LINE NOTE  ·  SELECT END NUMBER THEN TAP CELL TO CONNECT"
+                            }
+                        } else {
+                            if (selection.selectedCell == null)
+                                "LINE MODE (CELL)  ·  TAP FIRST CELL TO START LINE"
+                            else "LINE MODE (CELL)  ·  TAP SECOND CELL TO COMPLETE LINE"
+                        }
                     pencil -> "PENCIL MODE  ·  TAP OR DRAG TO TOGGLE NOTES"
                     else -> "SELECT A NUMBER THEN TAP A CELL"
                 },
@@ -657,117 +813,173 @@ private fun SudokuScreen(
             )
         }
         Spacer(Modifier.height(10.dp))
-        val completedDigitSurface = palette.color(ColorSlot.COMPLETED_DIGIT_SURFACE)
-        val completedDigitText = palette.color(ColorSlot.COMPLETED_DIGIT_TEXT)
         when (selection.mode) {
             SelectionMode.DIGIT -> {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                    (1..9).forEach { digit ->
-                        val active = selectedDigit == digit
-                        val completed = game.isDigitComplete(digit, hideMistakes)
-                        val remaining = (9 - game.digitCount(digit, hideMistakes)).coerceAtLeast(0)
-                        val buttonBg = when {
-                            active -> accentColor
-                            completed -> completedDigitSurface
-                            else -> surfaceColor
-                        }
-                        val mainTextColor = when {
-                            active -> bgColor
-                            completed -> completedDigitText
-                            else -> inkColor
-                        }
-                        val subTextColor = when {
-                            active -> bgColor
-                            completed -> completedDigitText
-                            else -> mutedColor
-                        }
-                        Column(
-                            Modifier
-                                .weight(1f)
-                                .background(buttonBg, RoundedCornerShape(8.dp))
-                                .combinedClickable(
-                                    onClick = { onDigit(digit) },
-                                    onLongClick = { onDigitLongPress(digit) }
-                                )
-                                .padding(vertical = 9.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Text("$digit", color = mainTextColor, fontSize = 23.sp, fontWeight = FontWeight.Medium)
-                            Text("$remaining", color = subTextColor, fontSize = 10.sp)
-                        }
-                    }
-                }
+                DigitBar(
+                    game = game,
+                    selectedDigit = selectedDigit,
+                    hideMistakes = hideMistakes,
+                    palette = palette,
+                    onDigit = onDigit,
+                    onDigitLongPress = onDigitLongPress
+                )
             }
             SelectionMode.COLOR -> {
-                Row(
-                    Modifier.fillMaxWidth().height(48.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    ANNOTATION_COLORS.forEachIndexed { i, colorValue ->
-                        val colorIdx = i + 1
-                        val active = selection.selectedColor == colorIdx
-                        Box(
-                            Modifier
-                                .weight(1f)
-                                .fillMaxHeight()
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(surfaceColor)
-                                .clickable { onSelectionChange(selection.copy(selectedColor = colorIdx)) }
-                                .padding(4.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        ActionButton(
+                            label = "Cell",
+                            enabled = true,
+                            action = { onSelectionChange(selection.setAnnotationTarget(AnnotationTarget.CELL)) },
+                            modifier = Modifier.weight(1f),
+                            palette = palette,
+                            active = selection.annotationTarget == AnnotationTarget.CELL,
+                            height = 34.dp
+                        )
+                        ActionButton(
+                            label = "Per Note",
+                            enabled = true,
+                            action = { onSelectionChange(selection.setAnnotationTarget(AnnotationTarget.NOTE)) },
+                            modifier = Modifier.weight(1f),
+                            palette = palette,
+                            active = selection.annotationTarget == AnnotationTarget.NOTE,
+                            height = 34.dp
+                        )
+                        val canClear = if (selection.annotationTarget == AnnotationTarget.NOTE) game.noteColors.isNotEmpty() else game.cellColors.isNotEmpty()
+                        ActionButton(
+                            label = "Clear",
+                            enabled = canClear && playing,
+                            action = onClearColors,
+                            modifier = Modifier.weight(1f),
+                            palette = palette,
+                            height = 34.dp
+                        )
+                    }
+                    Row(
+                        Modifier.fillMaxWidth().height(38.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        ANNOTATION_COLORS.forEachIndexed { i, colorValue ->
+                            val colorIdx = i + 1
+                            val active = selection.selectedColor == colorIdx
                             Box(
                                 Modifier
-                                    .size(24.dp)
-                                    .clip(CircleShape)
-                                    .background(Color(colorValue))
-                                    .border(
-                                        if (active) 2.5.dp else 0.dp,
-                                        if (active) inkColor else Color.Transparent,
-                                        CircleShape
-                                    )
-                            )
+                                    .weight(1f)
+                                    .fillMaxHeight()
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(surfaceColor)
+                                    .clickable { onSelectionChange(selection.copy(selectedColor = colorIdx)) }
+                                    .padding(4.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Box(
+                                    Modifier
+                                        .size(22.dp)
+                                        .clip(CircleShape)
+                                        .background(Color(colorValue))
+                                        .border(
+                                            if (active) 2.5.dp else 0.dp,
+                                            if (active) inkColor else Color.Transparent,
+                                            CircleShape
+                                        )
+                                )
+                            }
                         }
                     }
-                    ActionButton(
-                        label = "Clear",
-                        enabled = game.cellColors.isNotEmpty() && playing,
-                        action = onClearColors,
-                        modifier = Modifier.weight(1.8f),
-                        palette = palette
-                    )
+                    if (selection.annotationTarget == AnnotationTarget.NOTE) {
+                        DigitBar(
+                            game = game,
+                            selectedDigit = selectedDigit,
+                            hideMistakes = hideMistakes,
+                            palette = palette,
+                            onDigit = onDigit,
+                            onDigitLongPress = onDigitLongPress,
+                            verticalPadding = 6.dp,
+                            fontSize = 20.sp
+                        )
+                    }
                 }
             }
             SelectionMode.LINE -> {
-                Row(
-                    Modifier.fillMaxWidth().height(48.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    ActionButton(
-                        label = "Solid Line",
-                        enabled = true,
-                        action = { onSelectionChange(selection.copy(lineStyle = LineStyle.SOLID)) },
-                        modifier = Modifier.weight(1.2f),
-                        palette = palette,
-                        active = selection.lineStyle == LineStyle.SOLID
-                    )
-                    ActionButton(
-                        label = "Dotted Line",
-                        enabled = true,
-                        action = { onSelectionChange(selection.copy(lineStyle = LineStyle.DOTTED)) },
-                        modifier = Modifier.weight(1.2f),
-                        palette = palette,
-                        active = selection.lineStyle == LineStyle.DOTTED
-                    )
-                    ActionButton(
-                        label = "Clear",
-                        enabled = game.lines.isNotEmpty() && playing,
-                        action = onClearLines,
-                        modifier = Modifier.weight(1.2f),
-                        palette = palette
-                    )
+                Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        ActionButton(
+                            label = "Cell",
+                            enabled = true,
+                            action = { onSelectionChange(selection.setAnnotationTarget(AnnotationTarget.CELL)) },
+                            modifier = Modifier.weight(1f),
+                            palette = palette,
+                            active = selection.annotationTarget == AnnotationTarget.CELL,
+                            height = 34.dp
+                        )
+                        ActionButton(
+                            label = "Per Note",
+                            enabled = true,
+                            action = { onSelectionChange(selection.setAnnotationTarget(AnnotationTarget.NOTE)) },
+                            modifier = Modifier.weight(1f),
+                            palette = palette,
+                            active = selection.annotationTarget == AnnotationTarget.NOTE,
+                            height = 34.dp
+                        )
+                        val canClear = if (selection.annotationTarget == AnnotationTarget.NOTE) {
+                            game.lines.any { it.fromDigit != null || it.toDigit != null }
+                        } else {
+                            game.lines.any { it.fromDigit == null && it.toDigit == null }
+                        }
+                        ActionButton(
+                            label = "Clear",
+                            enabled = canClear && playing,
+                            action = onClearLines,
+                            modifier = Modifier.weight(1f),
+                            palette = palette,
+                            height = 34.dp
+                        )
+                    }
+                    Row(
+                        Modifier.fillMaxWidth().height(38.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        ActionButton(
+                            label = "Solid Line",
+                            enabled = true,
+                            action = { onSelectionChange(selection.copy(lineStyle = LineStyle.SOLID)) },
+                            modifier = Modifier.weight(1f),
+                            palette = palette,
+                            active = selection.lineStyle == LineStyle.SOLID,
+                            height = 36.dp
+                        )
+                        ActionButton(
+                            label = "Dotted Line",
+                            enabled = true,
+                            action = { onSelectionChange(selection.copy(lineStyle = LineStyle.DOTTED)) },
+                            modifier = Modifier.weight(1f),
+                            palette = palette,
+                            active = selection.lineStyle == LineStyle.DOTTED,
+                            height = 36.dp
+                        )
+                    }
+                    if (selection.annotationTarget == AnnotationTarget.NOTE) {
+                        DigitBar(
+                            game = game,
+                            selectedDigit = selectedDigit,
+                            hideMistakes = hideMistakes,
+                            palette = palette,
+                            onDigit = onDigit,
+                            onDigitLongPress = onDigitLongPress,
+                            verticalPadding = 6.dp,
+                            fontSize = 20.sp
+                        )
+                    }
                 }
             }
         }
@@ -796,6 +1008,85 @@ private fun SudokuScreen(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun DigitBar(
+    game: GameState,
+    selectedDigit: Int?,
+    hideMistakes: Boolean,
+    palette: ThemePalette,
+    onDigit: (Int) -> Unit,
+    onDigitLongPress: (Int) -> Unit,
+    verticalPadding: Dp = 9.dp,
+    fontSize: TextUnit = 23.sp
+) {
+    val accentColor = palette.color(ColorSlot.ACCENT)
+    val bgColor = palette.color(ColorSlot.BACKGROUND)
+    val surfaceColor = palette.color(ColorSlot.SURFACE)
+    val inkColor = palette.color(ColorSlot.INK)
+    val mutedColor = palette.color(ColorSlot.MUTED)
+    val completedDigitSurface = palette.color(ColorSlot.COMPLETED_DIGIT_SURFACE)
+    val completedDigitText = palette.color(ColorSlot.COMPLETED_DIGIT_TEXT)
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+        (1..9).forEach { digit ->
+            val active = selectedDigit == digit
+            val completed = game.isDigitComplete(digit, hideMistakes)
+            val remaining = (9 - game.digitCount(digit, hideMistakes)).coerceAtLeast(0)
+            val buttonBg = when {
+                active -> accentColor
+                completed -> completedDigitSurface
+                else -> surfaceColor
+            }
+            val mainTextColor = when {
+                active -> bgColor
+                completed -> completedDigitText
+                else -> inkColor
+            }
+            val subTextColor = when {
+                active -> bgColor
+                completed -> completedDigitText
+                else -> mutedColor
+            }
+            Column(
+                Modifier
+                    .weight(1f)
+                    .background(buttonBg, RoundedCornerShape(8.dp))
+                    .combinedClickable(
+                        onClick = { onDigit(digit) },
+                        onLongClick = { onDigitLongPress(digit) }
+                    )
+                    .padding(vertical = verticalPadding),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text("$digit", color = mainTextColor, fontSize = fontSize, fontWeight = FontWeight.Medium)
+                Text("$remaining", color = subTextColor, fontSize = 10.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun PauseIcon(tint: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier) {
+        val barWidth = size.width * 0.28f
+        val barHeight = size.height * 0.85f
+        val cornerRadius = androidx.compose.ui.geometry.CornerRadius(1.5.dp.toPx(), 1.5.dp.toPx())
+        val top = (size.height - barHeight) / 2f
+        drawRoundRect(
+            color = tint,
+            topLeft = Offset(size.width * 0.14f, top),
+            size = androidx.compose.ui.geometry.Size(barWidth, barHeight),
+            cornerRadius = cornerRadius
+        )
+        drawRoundRect(
+            color = tint,
+            topLeft = Offset(size.width * 0.58f, top),
+            size = androidx.compose.ui.geometry.Size(barWidth, barHeight),
+            cornerRadius = cornerRadius
+        )
+    }
+}
+
 @Composable
 private fun ActionButton(
     label: String,
@@ -803,7 +1094,8 @@ private fun ActionButton(
     action: () -> Unit,
     modifier: Modifier,
     palette: ThemePalette,
-    active: Boolean = false
+    active: Boolean = false,
+    height: Dp = 43.dp
 ) {
     val accentColor = palette.color(ColorSlot.ACCENT)
     val inkColor = palette.color(ColorSlot.INK)
@@ -812,7 +1104,7 @@ private fun ActionButton(
     OutlinedButton(
         onClick = action,
         enabled = enabled,
-        modifier = modifier.height(43.dp),
+        modifier = modifier.height(height),
         contentPadding = PaddingValues(horizontal = 3.dp),
         border = BorderStroke(1.dp, if (active) accentColor else borderColor)
     ) {
@@ -826,11 +1118,12 @@ private fun SudokuGrid(
     palette: ThemePalette,
     selectedCell: Int?,
     selectedDigit: Int?,
-    selectionMode: SelectionMode,
+    selection: SelectionState,
     pencilDragEnabled: Boolean,
     hideMistakes: Boolean,
-    onCell: (Int) -> Unit,
-    onPencilDragCell: (Int, Boolean) -> Boolean
+    onCell: (Int, Int) -> Unit,
+    onPencilDragCell: (Int, Boolean) -> Boolean,
+    modifier: Modifier = Modifier
 ) {
     val accentColor = palette.color(ColorSlot.ACCENT)
     val cellBorderColor = palette.color(ColorSlot.CELL_BORDER)
@@ -852,18 +1145,28 @@ private fun SudokuGrid(
     BoxWithConstraints(
         Modifier
             .fillMaxWidth()
+            .then(modifier)
             .border(2.dp, accentColor)
-            .pointerInput(selectionMode, pencilDragEnabled) {
+            .pointerInput(selection.mode, selection.annotationTarget, pencilDragEnabled) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
-                    fun cellAt(pos: Offset): Int? {
+                    fun cellAndNoteAt(pos: Offset): Pair<Int, Int>? {
                         if (size.width <= 0 || size.height <= 0) return null
                         if (pos.x < 0f || pos.y < 0f || pos.x >= size.width || pos.y >= size.height) return null
-                        val col = (pos.x / (size.width / 9f)).toInt().coerceIn(0, 8)
-                        val row = (pos.y / (size.height / 9f)).toInt().coerceIn(0, 8)
-                        return row * 9 + col
+                        val cellWidth = size.width / 9f
+                        val cellHeight = size.height / 9f
+                        val col = (pos.x / cellWidth).toInt().coerceIn(0, 8)
+                        val row = (pos.y / cellHeight).toInt().coerceIn(0, 8)
+                        val cell = row * 9 + col
+                        val localX = pos.x - col * cellWidth
+                        val localY = pos.y - row * cellHeight
+                        val noteC = (localX / (cellWidth / 3f)).toInt().coerceIn(0, 2)
+                        val noteR = (localY / (cellHeight / 3f)).toInt().coerceIn(0, 2)
+                        val digit = noteR * 3 + noteC + 1
+                        return cell to digit
                     }
-                    val startCell = cellAt(down.position)
+                    val startPair = cellAndNoteAt(down.position)
+                    val startCell = startPair?.first
                     if (!currentDragEnabled) {
                         var upPosition = down.position
                         while (true) {
@@ -872,9 +1175,9 @@ private fun SudokuGrid(
                             upPosition = change.position
                             if (!change.pressed) break
                         }
-                        val endCell = cellAt(upPosition)
-                        if (startCell != null && endCell == startCell) {
-                            currentOnCell(startCell)
+                        val endPair = cellAndNoteAt(upPosition)
+                        if (startPair != null && endPair?.first == startPair.first) {
+                            currentOnCell(startPair.first, startPair.second)
                         }
                     } else {
                         val visited = mutableSetOf<Int>()
@@ -891,7 +1194,7 @@ private fun SudokuGrid(
                             val event = awaitPointerEvent()
                             val change = event.changes.firstOrNull { it.id == down.id } ?: break
                             if (!change.pressed) break
-                            val cell = cellAt(change.position)
+                            val cell = cellAndNoteAt(change.position)?.first
                             if (cell != null && cell != startCell) {
                                 draggedOutsideStart = true
                             }
@@ -905,8 +1208,8 @@ private fun SudokuGrid(
                             }
                             change.consume()
                         }
-                        if (startFilled && !draggedOutsideStart) {
-                            currentOnCell(startCell)
+                        if (startFilled && !draggedOutsideStart && startPair != null) {
+                            currentOnCell(startPair.first, startPair.second)
                         }
                     }
                 }
@@ -976,16 +1279,38 @@ private fun SudokuGrid(
             val cellWidth = this.size.width / 9f
             val cellHeight = this.size.height / 9f
             for (line in currentGame.lines) {
-                val fromRow = line.from / 9
-                val fromCol = line.from % 9
-                val toRow = line.to / 9
-                val toCol = line.to % 9
-                val startOffset = Offset((fromCol + 0.5f) * cellWidth, (fromRow + 0.5f) * cellHeight)
-                val endOffset = Offset((toCol + 0.5f) * cellWidth, (toRow + 0.5f) * cellHeight)
-                val strokeWidth = 2.5.dp.toPx()
+                val fromRow = line.fromCell / 9
+                val fromCol = line.fromCell % 9
+                val startOffset = if (line.fromDigit != null) {
+                    val r = (line.fromDigit - 1) / 3
+                    val c = (line.fromDigit - 1) % 3
+                    Offset(
+                        (fromCol + (c + 0.5f) / 3f) * cellWidth,
+                        (fromRow + (r + 0.5f) / 3f) * cellHeight
+                    )
+                } else {
+                    Offset((fromCol + 0.5f) * cellWidth, (fromRow + 0.5f) * cellHeight)
+                }
+
+                val toRow = line.toCell / 9
+                val toCol = line.toCell % 9
+                val endOffset = if (line.toDigit != null) {
+                    val r = (line.toDigit - 1) / 3
+                    val c = (line.toDigit - 1) % 3
+                    Offset(
+                        (toCol + (c + 0.5f) / 3f) * cellWidth,
+                        (toRow + (r + 0.5f) / 3f) * cellHeight
+                    )
+                } else {
+                    Offset((toCol + 0.5f) * cellWidth, (toRow + 0.5f) * cellHeight)
+                }
+
+                val isNoteLine = line.fromDigit != null || line.toDigit != null
+                val strokeWidth = if (isNoteLine) 1.8.dp.toPx() else 2.5.dp.toPx()
                 val pathEffect = if (line.style == LineStyle.DOTTED) {
-                    PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 4.dp.toPx()), 0f)
+                    PathEffect.dashPathEffect(floatArrayOf(5.dp.toPx(), 3.5.dp.toPx()), 0f)
                 } else null
+
                 drawLine(
                     color = lineColor,
                     start = startOffset,
@@ -1022,20 +1347,46 @@ private fun SudokuGrid(
                                     val digit = r * 3 + c + 1
                                     val hasNote = digit in game.notes[index]
                                     val noteHighlighted = hasNote && selectedDigit == digit
+                                    val noteColorIdx = game.noteColors[noteColorKey(index, digit)]
+                                    val isSelectedStart = selection.mode == SelectionMode.LINE &&
+                                        selection.annotationTarget == AnnotationTarget.NOTE &&
+                                        selection.selectedCell == index &&
+                                        selection.selectedLineStartDigit == digit
                                     Box(
                                         Modifier
                                             .weight(1f)
                                             .fillMaxHeight()
-                                            .background(if (noteHighlighted) noteHighlightColor else Color.Transparent, RoundedCornerShape(2.dp)),
+                                            .background(if (noteHighlighted) noteHighlightColor else Color.Transparent, RoundedCornerShape(2.dp))
+                                            .then(
+                                                if (isSelectedStart) Modifier.border(1.5.dp, accentColor, CircleShape)
+                                                else Modifier
+                                            ),
                                         contentAlignment = Alignment.Center
                                     ) {
-                                        if (hasNote) Text(
-                                            "$digit",
-                                            color = if (noteHighlighted) inkColor else mutedColor,
-                                            fontSize = 9.sp,
-                                            lineHeight = 9.sp,
-                                            fontWeight = if (noteHighlighted) FontWeight.Bold else FontWeight.Normal
-                                        )
+                                        if (hasNote) {
+                                            if (noteColorIdx != null && noteColorIdx in 1..ANNOTATION_COLORS.size) {
+                                                val colVal = ANNOTATION_COLORS[noteColorIdx - 1]
+                                                Box(
+                                                    Modifier
+                                                        .size(16.dp)
+                                                        .clip(CircleShape)
+                                                        .background(Color(colVal))
+                                                )
+                                            }
+                                            val isBright = noteColorIdx != null && noteColorIdx in 1..ANNOTATION_COLORS.size && isBrightColor(ANNOTATION_COLORS[noteColorIdx - 1])
+                                            Text(
+                                                "$digit",
+                                                color = when {
+                                                    isBright -> Color.Black
+                                                    noteColorIdx != null -> Color.White
+                                                    noteHighlighted -> inkColor
+                                                    else -> mutedColor
+                                                },
+                                                fontSize = 9.sp,
+                                                lineHeight = 9.sp,
+                                                fontWeight = if (noteHighlighted || noteColorIdx != null) FontWeight.Bold else FontWeight.Normal
+                                            )
+                                        }
                                     }
                                 }
                             }

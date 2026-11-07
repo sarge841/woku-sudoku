@@ -19,18 +19,33 @@ object SaveCodec {
         require(cell in 0..80 && color in 1..9)
         cell to color
     }
-    private fun lines(lines: Set<BoardLine>) = lines.sortedWith(compareBy({ it.from }, { it.to })).joinToString(",") {
-        "${it.from}-${it.to}:${if (it.style == LineStyle.DOTTED) "D" else "S"}"
+    private fun parseNoteColors(s: String): Map<Int, Int> = if (s.isEmpty()) emptyMap() else s.split(",").associate { entry ->
+        val (key, color) = entry.split(":").map { it.toInt() }
+        require(noteColorCell(key) in 0..80 && noteColorDigit(key) in 1..9 && color in 1..9)
+        key to color
+    }
+    private fun lines(lines: Set<BoardLine>) = lines.sortedWith(
+        compareBy({ it.fromCell }, { it.fromDigit ?: 0 }, { it.toCell }, { it.toDigit ?: 0 })
+    ).joinToString(",") {
+        val fromStr = if (it.fromDigit != null) "${it.fromCell}.${it.fromDigit}" else "${it.fromCell}"
+        val toStr = if (it.toDigit != null) "${it.toCell}.${it.toDigit}" else "${it.toCell}"
+        val styleStr = if (it.style == LineStyle.DOTTED) "D" else "S"
+        "$fromStr-$toStr:$styleStr"
     }
     private fun parseLines(s: String): Set<BoardLine> = if (s.isEmpty()) emptySet() else s.split(",").map { entry ->
         val parts = entry.split(":")
-        val (from, to) = parts[0].split("-").map { it.toInt() }
-        require(from in 0..80 && to in 0..80 && from < to)
+        val endPoints = parts[0].split("-")
+        val fromParts = endPoints[0].split(".")
+        val toParts = endPoints[1].split(".")
+        val fromCell = fromParts[0].toInt()
+        val fromDigit = fromParts.getOrNull(1)?.toInt()
+        val toCell = toParts[0].toInt()
+        val toDigit = toParts.getOrNull(1)?.toInt()
         val style = if (parts.getOrNull(1) == "D") LineStyle.DOTTED else LineStyle.SOLID
-        BoardLine(from, to, style)
+        BoardLine.create(fromCell, fromDigit, toCell, toDigit, style)
     }.toSet()
     private fun snapshot(s: BoardSnapshot) =
-        digits(s.values) + ":" + notes(s.notes) + ";" + colors(s.cellColors) + ";" + lines(s.lines)
+        digits(s.values) + ":" + notes(s.notes) + ";" + colors(s.cellColors) + ";" + lines(s.lines) + ";" + colors(s.noteColors)
     private fun parseSnapshot(s: String): BoardSnapshot {
         val scParts = s.split(";")
         val parts = scParts[0].split(":", limit = 2)
@@ -39,7 +54,8 @@ object SaveCodec {
         val notes = parseNotes(parts[1])
         val cellColors = if (scParts.size > 1) parseColors(scParts[1]) else emptyMap()
         val lines = if (scParts.size > 2) parseLines(scParts[2]) else emptySet()
-        return BoardSnapshot(board, notes, cellColors, lines)
+        val noteColors = if (scParts.size > 3) parseNoteColors(scParts[3]) else emptyMap()
+        return BoardSnapshot(board, notes, cellColors, noteColors, lines)
     }
     private fun stack(items: List<BoardSnapshot>) = items.joinToString("~") { snapshot(it) }
     private fun parseStack(s: String) = if (s.isEmpty()) emptyList() else s.split("~").map(::parseSnapshot)
@@ -50,23 +66,25 @@ object SaveCodec {
         cell to digit
     }
 
-    /** Version 3 appends cell colors and lines; versions 1 and 2 saves still decode. */
+    /** Version 4 appends note colors and candidate line endpoints; versions 1, 2, and 3 saves still decode. */
     fun encode(game: GameState): String = listOf(
-        "3", game.difficulty.name, game.lives.toString(), game.elapsedSeconds.toString(),
+        "4", game.difficulty.name, game.lives.toString(), game.elapsedSeconds.toString(),
         digits(game.puzzle.givens), digits(game.puzzle.solution),
-        snapshot(BoardSnapshot(game.values, game.notes, game.cellColors, game.lines)),
+        snapshot(BoardSnapshot(game.values, game.notes, game.cellColors, game.noteColors, game.lines)),
         stack(game.history), stack(game.future),
         revealed(game.revealedMistakes),
         colors(game.cellColors),
-        lines(game.lines)
+        lines(game.lines),
+        colors(game.noteColors)
     ).joinToString("|")
 
     fun decode(save: String): GameState? = runCatching {
-        val p = save.split("|", limit = 13)
+        val p = save.split("|", limit = 14)
         require(
             (p.size == 9 && p[0] == "1") ||
             (p.size == 10 && p[0] == "2") ||
-            (p.size == 12 && p[0] == "3")
+            (p.size == 12 && p[0] == "3") ||
+            (p.size == 13 && p[0] == "4")
         )
         val difficulty = Difficulty.valueOf(p[1])
         val lives = p[2].toInt().also { require(it in 0..3) }
@@ -76,11 +94,13 @@ object SaveCodec {
         require(givens.indices.all { givens[it] == 0 || givens[it] == solution[it] })
         val current = parseSnapshot(p[6])
         require(givens.indices.all { givens[it] == 0 || current.values[it] == givens[it] })
-        val cellColors = if (p[0] == "3" && p.size >= 11) parseColors(p[10]) else if (p[0] == "3") current.cellColors else emptyMap()
-        val lines = if (p[0] == "3" && p.size >= 12) parseLines(p[11]) else if (p[0] == "3") current.lines else emptySet()
+        val cellColors = if (p.size >= 11 && (p[0] == "3" || p[0] == "4")) parseColors(p[10]) else if (p[0] == "3" || p[0] == "4") current.cellColors else emptyMap()
+        val lines = if (p.size >= 12 && (p[0] == "3" || p[0] == "4")) parseLines(p[11]) else if (p[0] == "3" || p[0] == "4") current.lines else emptySet()
+        val noteColors = if (p.size >= 13 && p[0] == "4") parseNoteColors(p[12]) else if (p[0] == "4") current.noteColors else emptyMap()
         GameState(
             Puzzle(givens, solution), difficulty, current.values, current.notes,
             cellColors = cellColors,
+            noteColors = noteColors,
             lines = lines,
             lives = lives,
             elapsedSeconds = seconds,

@@ -10,7 +10,7 @@ Start with [`../../AGENTS.md`](../../AGENTS.md), then use these pages as needed:
 
 This is a **single-module, offline Android application**, not a web app. The source of truth for behavior is the Kotlin code and unit tests, not this document. If documentation and code disagree, inspect the implementation and tests, fix the mismatch, and explain the change. Do not silently change a game rule merely to make a document true.
 
-The default branch is `main`; the package/application ID is `com.sarge841.woku`. Build configuration is in `app/build.gradle.kts`; the GitHub Actions pipeline is `.github/workflows/android.yml`. The most recent release at the time these docs were written is `v1.1.0`; check tags and GitHub before relying on that version for a new release.
+The default branch is `main`; the package/application ID is `com.sarge841.woku`. Build configuration is in `app/build.gradle.kts`; the GitHub Actions pipeline is `.github/workflows/android.yml`. The most recent release at the time these docs were written is `v2.2.0`; check tags and GitHub before relying on that version for a new release.
 
 ## Where to work
 

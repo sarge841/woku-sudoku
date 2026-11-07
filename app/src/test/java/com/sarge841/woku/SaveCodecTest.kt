@@ -22,20 +22,38 @@ class SaveCodecTest {
         val game = GameState.new(puzzle, Difficulty.MEDIUM)
             .setColor(5, 2)
             .setColor(14, 4)
+            .setNoteColor(14, 3, 1)
             .toggleLine(5, 14, LineStyle.SOLID)
             .toggleLine(14, 23, LineStyle.DOTTED)
+            .toggleLine(14, 3, 14, 7, LineStyle.SOLID)
 
         val encoded = SaveCodec.encode(game)
         val decoded = SaveCodec.decode(encoded)
         assertEquals(game, decoded)
         assertEquals(mapOf(5 to 2, 14 to 4), decoded?.cellColors)
-        assertEquals(setOf(BoardLine(5, 14, LineStyle.SOLID), BoardLine(14, 23, LineStyle.DOTTED)), decoded?.lines)
+        assertEquals(mapOf(noteColorKey(14, 3) to 1), decoded?.noteColors)
+        assertEquals(
+            setOf(
+                BoardLine(5, 14, LineStyle.SOLID),
+                BoardLine(14, 23, LineStyle.DOTTED),
+                BoardLine.create(14, 3, 14, 7, LineStyle.SOLID)
+            ),
+            decoded?.lines
+        )
+
+        // Version 3 save decoding test
+        val v3 = SaveCodec.encode(game).replaceFirst("4|", "3|").split("|").take(12).joinToString("|")
+        val decodedV3 = SaveCodec.decode(v3)
+        assertNotNull(decodedV3)
+        assertEquals(mapOf(5 to 2, 14 to 4), decodedV3?.cellColors)
+        assertEquals(emptyMap<Int, Int>(), decodedV3?.noteColors)
 
         // Version 2 save decoding test
-        val v2 = SaveCodec.encode(game).replaceFirst("3|", "2|").split("|").take(10).joinToString("|")
+        val v2 = SaveCodec.encode(game).replaceFirst("4|", "2|").split("|").take(10).joinToString("|")
         val decodedV2 = SaveCodec.decode(v2)
         assertNotNull(decodedV2)
         assertEquals(emptyMap<Int, Int>(), decodedV2?.cellColors)
+        assertEquals(emptyMap<Int, Int>(), decodedV2?.noteColors)
         assertEquals(emptySet<BoardLine>(), decodedV2?.lines)
     }
 
@@ -47,8 +65,8 @@ class SaveCodecTest {
         assertEquals(mapOf(i to wrong), game.revealedMistakes)
         assertEquals(game, SaveCodec.decode(SaveCodec.encode(game)))
 
-        val v1 = SaveCodec.encode(game).replaceFirst("3|", "1|").split("|").take(9).joinToString("|")
-        assertEquals(game.copy(revealedMistakes = emptyMap(), cellColors = emptyMap(), lines = emptySet()), SaveCodec.decode(v1))
+        val v1 = SaveCodec.encode(game).replaceFirst("4|", "1|").split("|").take(9).joinToString("|")
+        assertEquals(game.copy(revealedMistakes = emptyMap(), cellColors = emptyMap(), noteColors = emptyMap(), lines = emptySet()), SaveCodec.decode(v1))
     }
 
     @Test fun diabolicalPlusSaveRoundTrips() {

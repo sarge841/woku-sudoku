@@ -4,7 +4,53 @@ enum class GameStatus { PLAYING, WON, LOST }
 
 enum class LineStyle { SOLID, DOTTED }
 
-data class BoardLine(val from: Int, val to: Int, val style: LineStyle = LineStyle.SOLID)
+data class BoardLine(
+    val fromCell: Int,
+    val fromDigit: Int? = null,
+    val toCell: Int,
+    val toDigit: Int? = null,
+    val style: LineStyle = LineStyle.SOLID
+) {
+    val from: Int get() = fromCell
+    val to: Int get() = toCell
+
+    constructor(from: Int, to: Int, style: LineStyle = LineStyle.SOLID) : this(from, null, to, null, style)
+
+    companion object {
+        fun create(
+            fromCell: Int,
+            fromDigit: Int? = null,
+            toCell: Int,
+            toDigit: Int? = null,
+            style: LineStyle = LineStyle.SOLID
+        ): BoardLine {
+            val cmp = compareEndpoints(fromCell, fromDigit, toCell, toDigit)
+            return if (cmp <= 0) {
+                BoardLine(fromCell, fromDigit, toCell, toDigit, style)
+            } else {
+                BoardLine(toCell, toDigit, fromCell, fromDigit, style)
+            }
+        }
+
+        fun compareEndpoints(c1: Int, d1: Int?, c2: Int, d2: Int?): Int {
+            val c = c1.compareTo(c2)
+            if (c != 0) return c
+            return (d1 ?: 0).compareTo(d2 ?: 0)
+        }
+    }
+}
+
+fun noteColorKey(cell: Int, digit: Int): Int = cell * 10 + digit
+fun noteColorCell(key: Int): Int = key / 10
+fun noteColorDigit(key: Int): Int = key % 10
+
+fun isBrightColor(argb: Long): Boolean {
+    val r = ((argb shr 16) and 0xFF) / 255.0
+    val g = ((argb shr 8) and 0xFF) / 255.0
+    val b = (argb and 0xFF) / 255.0
+    val luminance = 0.299 * r + 0.587 * g + 0.114 * b
+    return luminance > 0.55
+}
 
 val ANNOTATION_COLORS = listOf(
     0xFFFF5252, // 1: Red / Coral
@@ -21,8 +67,12 @@ data class BoardSnapshot(
     val values: List<Int>,
     val notes: List<Set<Int>>,
     val cellColors: Map<Int, Int> = emptyMap(),
+    val noteColors: Map<Int, Int> = emptyMap(),
     val lines: Set<BoardLine> = emptySet()
-)
+) {
+    constructor(values: List<Int>, notes: List<Set<Int>>, cellColors: Map<Int, Int>, lines: Set<BoardLine>) :
+        this(values, notes, cellColors, emptyMap(), lines)
+}
 
 data class GameState(
     val puzzle: Puzzle,
@@ -30,6 +80,7 @@ data class GameState(
     val values: List<Int>,
     val notes: List<Set<Int>>,
     val cellColors: Map<Int, Int> = emptyMap(),
+    val noteColors: Map<Int, Int> = emptyMap(),
     val lines: Set<BoardLine> = emptySet(),
     val lives: Int = 3,
     val elapsedSeconds: Int = 0,
@@ -38,6 +89,21 @@ data class GameState(
     /** Cell → wrong value revealed by [checkMistakes] (used only when mistakes are hidden until checked). */
     val revealedMistakes: Map<Int, Int> = emptyMap()
 ) {
+    constructor(
+        puzzle: Puzzle,
+        difficulty: Difficulty,
+        values: List<Int>,
+        notes: List<Set<Int>>,
+        cellColors: Map<Int, Int>,
+        lines: Set<BoardLine>,
+        lives: Int = 3,
+        elapsedSeconds: Int = 0,
+        history: List<BoardSnapshot> = emptyList(),
+        future: List<BoardSnapshot> = emptyList(),
+        revealedMistakes: Map<Int, Int> = emptyMap()
+    ) : this(
+        puzzle, difficulty, values, notes, cellColors, emptyMap(), lines, lives, elapsedSeconds, history, future, revealedMistakes
+    )
     val status: GameStatus get() = when {
         lives == 0 -> GameStatus.LOST
         values == puzzle.solution -> GameStatus.WON
@@ -100,22 +166,49 @@ data class GameState(
         return copy(lives = newLives, revealedMistakes = wrong.associateWith { values[it] })
     }
 
+    private fun cleanAnnotationsForRemovedNotes(
+        oldNotes: List<Set<Int>>,
+        newNotes: List<Set<Int>>,
+        currentNoteColors: Map<Int, Int>,
+        currentLines: Set<BoardLine>
+    ): Pair<Map<Int, Int>, Set<BoardLine>> {
+        val removed = mutableSetOf<Int>()
+        for (cell in 0..80) {
+            val old = oldNotes.getOrNull(cell) ?: emptySet()
+            val new = newNotes.getOrNull(cell) ?: emptySet()
+            for (d in old - new) {
+                removed.add(noteColorKey(cell, d))
+            }
+        }
+        if (removed.isEmpty()) return currentNoteColors to currentLines
+        val cleanedColors = currentNoteColors.filterKeys { it !in removed }
+        val cleanedLines = currentLines.filterNot {
+            (it.fromDigit != null && noteColorKey(it.fromCell, it.fromDigit) in removed) ||
+            (it.toDigit != null && noteColorKey(it.toCell, it.toDigit) in removed)
+        }.toSet()
+        return cleanedColors to cleanedLines
+    }
+
     private fun changed(
         newValues: List<Int> = values,
         newNotes: List<Set<Int>> = notes,
         newCellColors: Map<Int, Int> = cellColors,
+        newNoteColors: Map<Int, Int> = noteColors,
         newLines: Set<BoardLine> = lines,
         newLives: Int = lives
-    ): GameState =
-        copy(
+    ): GameState {
+        val (cleanedNoteColors, cleanedLines) = cleanAnnotationsForRemovedNotes(notes, newNotes, newNoteColors, newLines)
+        return copy(
             values = newValues,
             notes = newNotes,
             cellColors = newCellColors,
-            lines = newLines,
+            noteColors = cleanedNoteColors,
+            lines = cleanedLines,
             lives = newLives,
-            history = (history + BoardSnapshot(values, notes, cellColors, lines)).takeLast(200),
+            history = (history + BoardSnapshot(values, notes, cellColors, noteColors, lines)).takeLast(200),
             future = emptyList()
         )
+    }
 
     fun place(index: Int, digit: Int, livesEnabled: Boolean = true, hideMistakes: Boolean = false): GameState {
         if (status(livesEnabled) != GameStatus.PLAYING || index !in 0..80 || digit !in 0..9 || puzzle.givens[index] != 0 || values[index] == digit) return this
@@ -148,7 +241,12 @@ data class GameState(
         if (status(livesEnabled) != GameStatus.PLAYING || index !in 0..80 || digit !in 1..9 || values[index] != 0) return this
         val newNotes = notes.toMutableList()
         newNotes[index] = if (digit in notes[index]) notes[index] - digit else notes[index] + digit
-        return if (recordHistory) changed(newNotes = newNotes) else copy(notes = newNotes)
+        return if (recordHistory) {
+            changed(newNotes = newNotes)
+        } else {
+            val (cleanedColors, cleanedLines) = cleanAnnotationsForRemovedNotes(notes, newNotes, noteColors, lines)
+            copy(notes = newNotes, noteColors = cleanedColors, lines = cleanedLines)
+        }
     }
 
     fun setColor(index: Int, colorIndex: Int, livesEnabled: Boolean = true): GameState {
@@ -163,25 +261,97 @@ data class GameState(
         return changed(newCellColors = newColors)
     }
 
-    fun toggleLine(from: Int, to: Int, style: LineStyle, livesEnabled: Boolean = true): GameState {
-        if (status(livesEnabled) != GameStatus.PLAYING || from !in 0..80 || to !in 0..80 || from == to) return this
-        val a = minOf(from, to)
-        val b = maxOf(from, to)
-        val existing = lines.firstOrNull { it.from == a && it.to == b }
-        val newLines = if (existing == null) {
-            lines + BoardLine(a, b, style)
-        } else if (existing.style != style) {
-            lines - existing + BoardLine(a, b, style)
+    fun setNoteColor(index: Int, digit: Int, colorIndex: Int, livesEnabled: Boolean = true): GameState {
+        if (status(livesEnabled) != GameStatus.PLAYING || index !in 0..80 || digit !in 1..9 || values[index] != 0) return this
+        val key = noteColorKey(index, digit)
+        val currentColor = noteColors[key]
+        val newNoteColors = if (currentColor == colorIndex || colorIndex == 0) {
+            noteColors - key
         } else {
-            lines - existing
+            noteColors + (key to colorIndex)
         }
-        if (newLines == lines) return this
-        return changed(newLines = newLines)
+        val newNotes = if (digit !in notes[index]) {
+            val mutable = notes.toMutableList()
+            mutable[index] = notes[index] + digit
+            mutable
+        } else {
+            notes
+        }
+        if (newNoteColors == noteColors && newNotes == notes) return this
+        return changed(newNotes = newNotes, newNoteColors = newNoteColors)
+    }
+
+    fun toggleLine(from: Int, to: Int, style: LineStyle, livesEnabled: Boolean = true): GameState =
+        toggleLine(from, null, to, null, style, livesEnabled)
+
+    fun toggleLine(
+        fromCell: Int,
+        fromDigit: Int?,
+        toCell: Int,
+        toDigit: Int?,
+        style: LineStyle,
+        livesEnabled: Boolean = true
+    ): GameState {
+        if (status(livesEnabled) != GameStatus.PLAYING) return this
+        if (fromCell !in 0..80 || toCell !in 0..80) return this
+        if (fromCell == toCell && fromDigit == toDigit) return this
+        if (fromDigit != null && (fromDigit !in 1..9 || values[fromCell] != 0)) return this
+        if (toDigit != null && (toDigit !in 1..9 || values[toCell] != 0)) return this
+
+        val candidate = BoardLine.create(fromCell, fromDigit, toCell, toDigit, style)
+        val existing = lines.firstOrNull {
+            it.fromCell == candidate.fromCell && it.fromDigit == candidate.fromDigit &&
+            it.toCell == candidate.toCell && it.toDigit == candidate.toDigit
+        }
+        val newLines = when {
+            existing == null -> lines + candidate
+            existing.style == style -> lines - existing
+            else -> lines - existing + candidate
+        }
+
+        var newNotes = notes
+        if (fromDigit != null && fromDigit !in notes[fromCell]) {
+            val m = newNotes.toMutableList()
+            m[fromCell] = m[fromCell] + fromDigit
+            newNotes = m
+        }
+        if (toDigit != null && toDigit !in newNotes[toCell]) {
+            val m = newNotes.toMutableList()
+            m[toCell] = m[toCell] + toDigit
+            newNotes = m
+        }
+
+        if (newLines == lines && newNotes == notes) return this
+        return changed(newNotes = newNotes, newLines = newLines)
     }
 
     fun clearAllCellColors(livesEnabled: Boolean = true): GameState {
         if (status(livesEnabled) != GameStatus.PLAYING || cellColors.isEmpty()) return this
         return changed(newCellColors = emptyMap())
+    }
+
+    fun clearAllNoteColors(livesEnabled: Boolean = true): GameState {
+        if (status(livesEnabled) != GameStatus.PLAYING || noteColors.isEmpty()) return this
+        return changed(newNoteColors = emptyMap())
+    }
+
+    fun clearAllColors(livesEnabled: Boolean = true): GameState {
+        if (status(livesEnabled) != GameStatus.PLAYING || (cellColors.isEmpty() && noteColors.isEmpty())) return this
+        return changed(newCellColors = emptyMap(), newNoteColors = emptyMap())
+    }
+
+    fun clearAllCellLines(livesEnabled: Boolean = true): GameState {
+        if (status(livesEnabled) != GameStatus.PLAYING) return this
+        val newLines = lines.filterNot { it.fromDigit == null && it.toDigit == null }.toSet()
+        if (newLines == lines) return this
+        return changed(newLines = newLines)
+    }
+
+    fun clearAllNoteLines(livesEnabled: Boolean = true): GameState {
+        if (status(livesEnabled) != GameStatus.PLAYING) return this
+        val newLines = lines.filter { it.fromDigit == null && it.toDigit == null }.toSet()
+        if (newLines == lines) return this
+        return changed(newLines = newLines)
     }
 
     fun clearAllLines(livesEnabled: Boolean = true): GameState {
@@ -192,15 +362,16 @@ data class GameState(
     fun clearCellAnnotations(index: Int, livesEnabled: Boolean = true): GameState {
         if (status(livesEnabled) != GameStatus.PLAYING || index !in 0..80) return this
         val newColors = cellColors - index
-        val newLines = lines.filterNot { it.from == index || it.to == index }.toSet()
-        if (newColors == cellColors && newLines == lines) return this
-        return changed(newCellColors = newColors, newLines = newLines)
+        val newNoteColors = noteColors.filterKeys { noteColorCell(it) != index }
+        val newLines = lines.filterNot { it.fromCell == index || it.toCell == index }.toSet()
+        if (newColors == cellColors && newNoteColors == noteColors && newLines == lines) return this
+        return changed(newCellColors = newColors, newNoteColors = newNoteColors, newLines = newLines)
     }
 
     fun clearAllAnnotations(livesEnabled: Boolean = true): GameState {
         if (status(livesEnabled) != GameStatus.PLAYING) return this
-        if (cellColors.isEmpty() && lines.isEmpty()) return this
-        return changed(newCellColors = emptyMap(), newLines = emptySet())
+        if (cellColors.isEmpty() && noteColors.isEmpty() && lines.isEmpty()) return this
+        return changed(newCellColors = emptyMap(), newNoteColors = emptyMap(), newLines = emptySet())
     }
 
     fun fastPencil(livesEnabled: Boolean = true): GameState {
@@ -216,9 +387,10 @@ data class GameState(
             values = prior.values,
             notes = prior.notes,
             cellColors = prior.cellColors,
+            noteColors = prior.noteColors,
             lines = prior.lines,
             history = history.dropLast(1),
-            future = future + BoardSnapshot(values, notes, cellColors, lines)
+            future = future + BoardSnapshot(values, notes, cellColors, noteColors, lines)
         )
     }
 
@@ -229,9 +401,10 @@ data class GameState(
             values = next.values,
             notes = next.notes,
             cellColors = next.cellColors,
+            noteColors = next.noteColors,
             lines = next.lines,
             future = future.dropLast(1),
-            history = history + BoardSnapshot(values, notes, cellColors, lines)
+            history = history + BoardSnapshot(values, notes, cellColors, noteColors, lines)
         )
     }
 
@@ -245,6 +418,7 @@ data class GameState(
 }
 
 enum class SelectionMode { DIGIT, COLOR, LINE }
+enum class AnnotationTarget { CELL, NOTE }
 
 data class SelectionState(
     val selectedCell: Int? = null,
@@ -252,29 +426,61 @@ data class SelectionState(
     val pencil: Boolean = false,
     val viewOnly: Boolean = false,
     val mode: SelectionMode = SelectionMode.DIGIT,
+    val annotationTarget: AnnotationTarget = AnnotationTarget.CELL,
     val selectedColor: Int = 1,
-    val lineStyle: LineStyle = LineStyle.SOLID
+    val lineStyle: LineStyle = LineStyle.SOLID,
+    val selectedLineStartDigit: Int? = null
 ) {
     fun onCellTap(
         game: GameState,
         index: Int,
+        targetDigit: Int? = null,
         livesEnabled: Boolean = true,
         autoAdvanceDigit: Boolean = true,
         hideMistakes: Boolean = false
     ): Pair<GameState, SelectionState> {
         if (mode == SelectionMode.COLOR) {
-            val nextGame = game.setColor(index, selectedColor, livesEnabled)
-            return nextGame to copy(selectedCell = index)
+            val digit = selectedDigit ?: targetDigit
+            return if (annotationTarget == AnnotationTarget.NOTE) {
+                if (digit == null || game.values[index] != 0) game to copy(selectedCell = index)
+                else {
+                    val nextGame = game.setNoteColor(index, digit, selectedColor, livesEnabled)
+                    nextGame to copy(selectedCell = index, selectedDigit = digit)
+                }
+            } else {
+                val nextGame = game.setColor(index, selectedColor, livesEnabled)
+                nextGame to copy(selectedCell = index)
+            }
         }
         if (mode == SelectionMode.LINE) {
-            val from = selectedCell
-            return if (from == null) {
-                game to copy(selectedCell = index)
-            } else if (from == index) {
-                game to copy(selectedCell = null)
+            val digit = selectedDigit ?: targetDigit
+            return if (annotationTarget == AnnotationTarget.NOTE) {
+                if (digit == null || game.values[index] != 0) game to copy(selectedCell = index)
+                else {
+                    val fromCell = selectedCell
+                    val fromDigit = selectedLineStartDigit
+                    if (fromCell == null || fromDigit == null) {
+                        val g = if (digit !in game.notes[index]) {
+                            game.toggleNote(index, digit, livesEnabled, recordHistory = true)
+                        } else game
+                        g to copy(selectedCell = index, selectedLineStartDigit = digit, selectedDigit = digit)
+                    } else if (fromCell == index && fromDigit == digit) {
+                        game to copy(selectedCell = null, selectedLineStartDigit = null)
+                    } else {
+                        val nextGame = game.toggleLine(fromCell, fromDigit, index, digit, lineStyle, livesEnabled)
+                        nextGame to copy(selectedCell = null, selectedLineStartDigit = null, selectedDigit = digit)
+                    }
+                }
             } else {
-                val nextGame = game.toggleLine(from, index, lineStyle, livesEnabled)
-                nextGame to copy(selectedCell = null)
+                val from = selectedCell
+                if (from == null) {
+                    game to copy(selectedCell = index, selectedLineStartDigit = null)
+                } else if (from == index) {
+                    game to copy(selectedCell = null, selectedLineStartDigit = null)
+                } else {
+                    val nextGame = game.toggleLine(from, index, lineStyle, livesEnabled)
+                    nextGame to copy(selectedCell = null, selectedLineStartDigit = null)
+                }
             }
         }
         val placed = game.values.getOrNull(index) ?: 0
@@ -299,6 +505,14 @@ data class SelectionState(
         return nextGame to updatedSelection
     }
 
+    fun onCellTap(
+        game: GameState,
+        index: Int,
+        livesEnabled: Boolean = true,
+        autoAdvanceDigit: Boolean = true,
+        hideMistakes: Boolean = false
+    ): Pair<GameState, SelectionState> = onCellTap(game, index, null, livesEnabled, autoAdvanceDigit, hideMistakes)
+
     fun onPencilDragCell(
         game: GameState,
         index: Int,
@@ -313,10 +527,18 @@ data class SelectionState(
         return nextGame to copy(selectedCell = index)
     }
 
-    fun onDigitTap(digit: Int): SelectionState = copy(selectedCell = null, selectedDigit = digit)
+    fun onDigitTap(digit: Int): SelectionState =
+        if (mode == SelectionMode.LINE && annotationTarget == AnnotationTarget.NOTE && selectedCell != null && selectedLineStartDigit != null) {
+            copy(selectedDigit = digit)
+        } else {
+            copy(selectedCell = null, selectedDigit = digit)
+        }
 
     fun onDigitLongPress(digit: Int): SelectionState =
-        if (selectedDigit == digit) copy(selectedDigit = null) else this
+        if (selectedDigit == digit) {
+            if (mode == SelectionMode.LINE) copy(selectedDigit = null, selectedCell = null, selectedLineStartDigit = null)
+            else copy(selectedDigit = null)
+        } else this
 
     fun togglePencil(): SelectionState =
         if (pencil) copy(pencil = false) else copy(pencil = true, viewOnly = false)
@@ -325,7 +547,21 @@ data class SelectionState(
         if (viewOnly) copy(viewOnly = false) else copy(viewOnly = true, pencil = false)
 
     fun setMode(newMode: SelectionMode): SelectionState =
-        if (mode == newMode) copy(mode = SelectionMode.DIGIT, selectedCell = null) else copy(mode = newMode, selectedCell = null)
+        if (mode == newMode) copy(mode = SelectionMode.DIGIT, selectedCell = null, selectedLineStartDigit = null)
+        else copy(
+            mode = newMode,
+            selectedCell = null,
+            selectedLineStartDigit = null,
+            selectedDigit = if (annotationTarget == AnnotationTarget.NOTE && selectedDigit == null) 1 else selectedDigit
+        )
+
+    fun setAnnotationTarget(newTarget: AnnotationTarget): SelectionState =
+        copy(
+            annotationTarget = newTarget,
+            selectedCell = null,
+            selectedLineStartDigit = null,
+            selectedDigit = if (newTarget == AnnotationTarget.NOTE && selectedDigit == null) 1 else selectedDigit
+        )
 }
 
 enum class ColorSlot(val label: String, val defaultArgb: Long, val options: List<Long>) {

@@ -402,6 +402,142 @@ class GameTest {
         assertNull(s4.selectedCell)
     }
 
+    @Test fun noteColoringAndLinesCanBeToggledAndUndone() {
+        val start = game()
+        val key = noteColorKey(10, 4)
+        // Auto-adds note 4 when coloring
+        val colored = start.setNoteColor(10, 4, 3)
+        assertTrue(4 in colored.notes[10])
+        assertEquals(mapOf(key to 3), colored.noteColors)
+
+        // Toggling same color removes color
+        val toggledSameColor = colored.setNoteColor(10, 4, 3)
+        assertEquals(emptyMap<Int, Int>(), toggledSameColor.noteColors)
+        assertTrue(4 in toggledSameColor.notes[10])
+
+        // Line between candidate notes across cells (auto-adds notes if absent)
+        val withLine = start.toggleLine(10, 2, 20, 7, LineStyle.SOLID)
+        assertTrue(2 in withLine.notes[10])
+        assertTrue(7 in withLine.notes[20])
+        val expectedLine = BoardLine.create(10, 2, 20, 7, LineStyle.SOLID)
+        assertEquals(setOf(expectedLine), withLine.lines)
+
+        // Line within the same cell between different digits
+        val intraCell = start.toggleLine(10, 2, 10, 8, LineStyle.DOTTED)
+        assertTrue(2 in intraCell.notes[10])
+        assertTrue(8 in intraCell.notes[10])
+        val expectedIntra = BoardLine.create(10, 2, 10, 8, LineStyle.DOTTED)
+        assertEquals(setOf(expectedIntra), intraCell.lines)
+
+        // Undo/redo candidate note colors and lines
+        val s1 = start.setNoteColor(5, 3, 2)
+        val s2 = s1.toggleLine(5, 3, 6, 4, LineStyle.SOLID)
+        assertEquals(s1.noteColors, s2.undo().noteColors)
+        assertEquals(s1.lines, s2.undo().lines)
+        assertEquals(s2.noteColors, s2.undo().redo().noteColors)
+        assertEquals(s2.lines, s2.undo().redo().lines)
+
+        // Clear note colors only
+        val multiple = start.setNoteColor(1, 2, 2).setColor(1, 1).toggleLine(1, 2, 2, 3, LineStyle.SOLID).toggleLine(1, 2, LineStyle.SOLID)
+        val clearedNoteColors = multiple.clearAllNoteColors()
+        assertEquals(emptyMap<Int, Int>(), clearedNoteColors.noteColors)
+        assertEquals(mapOf(1 to 1), clearedNoteColors.cellColors)
+        assertEquals(multiple.lines, clearedNoteColors.lines)
+
+        // Clear note lines only
+        val clearedNoteLines = multiple.clearAllNoteLines()
+        assertEquals(setOf(BoardLine(1, 2, LineStyle.SOLID)), clearedNoteLines.lines)
+        assertEquals(multiple.noteColors, clearedNoteLines.noteColors)
+    }
+
+    @Test fun removingCandidateNoteClearsItsColorsAndLines() {
+        val start = game().setNoteColor(1, 3, 2).toggleLine(1, 3, 2, 4, LineStyle.SOLID)
+        assertTrue(3 in start.notes[1])
+        assertTrue(4 in start.notes[2])
+        assertTrue(noteColorKey(1, 3) in start.noteColors)
+        assertEquals(1, start.lines.size)
+
+        // Toggling note 3 off in cell 1 clears its color and line
+        val removed = start.toggleNote(1, 3)
+        assertFalse(3 in removed.notes[1])
+        assertFalse(noteColorKey(1, 3) in removed.noteColors)
+        assertEquals(emptySet<BoardLine>(), removed.lines)
+
+        // Undo restores candidate note, color, and line
+        val restored = removed.undo()
+        assertTrue(3 in restored.notes[1])
+        assertTrue(noteColorKey(1, 3) in restored.noteColors)
+        assertEquals(start.lines, restored.lines)
+
+        // Placing a digit in cell 1 clears all notes in cell 1 and peer notes of that digit
+        val withNotes = game()
+            .setNoteColor(1, 3, 2)
+            .toggleLine(1, 3, 10, 3, LineStyle.SOLID) // peer cell 10 also has note 3
+        val placed = withNotes.place(1, 3) // correct placement in cell 1 (solution[1] == 3)
+        assertTrue(placed.notes[1].isEmpty())
+        assertFalse(3 in placed.notes[10]) // peer note eliminated
+        assertTrue(placed.noteColors.isEmpty())
+        assertTrue(placed.lines.isEmpty())
+    }
+
+    @Test fun noteSelectionModeHandlesCandidateColoringAndLineConnecting() {
+        val start = game()
+        val colorNoteMode = SelectionState(
+            mode = SelectionMode.COLOR,
+            annotationTarget = AnnotationTarget.NOTE,
+            selectedColor = 2
+        )
+
+        // Tapping cell with note candidate 4 in note color mode colors that note
+        val (coloredGame, _) = colorNoteMode.onCellTap(start, 10, targetDigit = 4)
+        assertTrue(4 in coloredGame.notes[10])
+        assertEquals(2, coloredGame.noteColors[noteColorKey(10, 4)])
+
+        // Selecting digit from number bar in Color Note mode, then tapping cell
+        val colorWithSelectedDigit = SelectionState(
+            mode = SelectionMode.COLOR,
+            annotationTarget = AnnotationTarget.NOTE,
+            selectedColor = 3
+        ).onDigitTap(6)
+        assertEquals(6, colorWithSelectedDigit.selectedDigit)
+        val (coloredWithDigit, _) = colorWithSelectedDigit.onCellTap(start, 25)
+        assertTrue(6 in coloredWithDigit.notes[25])
+        assertEquals(3, coloredWithDigit.noteColors[noteColorKey(25, 6)])
+
+        // Selecting digit in Line Note mode, changing digit for end cell
+        val lineNoteMode = SelectionState(
+            mode = SelectionMode.LINE,
+            annotationTarget = AnnotationTarget.NOTE,
+            lineStyle = LineStyle.SOLID
+        ).onDigitTap(4)
+
+        // Tap start cell 10 with digit 4
+        val (g1, s1) = lineNoteMode.onCellTap(start, 10)
+        assertEquals(10, s1.selectedCell)
+        assertEquals(4, s1.selectedLineStartDigit)
+        assertTrue(4 in g1.notes[10])
+
+        // Select digit 8 for the destination endpoint: start cell/digit are preserved!
+        val sWithEndDigit = s1.onDigitTap(8)
+        assertEquals(10, sWithEndDigit.selectedCell)
+        assertEquals(4, sWithEndDigit.selectedLineStartDigit)
+        assertEquals(8, sWithEndDigit.selectedDigit)
+
+        // Tap end cell 20 with digit 8: connects line and places note 8 in cell 20
+        val (gLine, sEnd) = sWithEndDigit.onCellTap(g1, 20)
+        assertNull(sEnd.selectedCell)
+        assertNull(sEnd.selectedLineStartDigit)
+        assertEquals(8, sEnd.selectedDigit)
+        assertTrue(8 in gLine.notes[20])
+        assertEquals(setOf(BoardLine.create(10, 4, 20, 8, LineStyle.SOLID)), gLine.lines)
+
+        // Tap same start candidate note -> cancels start selection
+        val (_, sStartAgain) = lineNoteMode.onCellTap(start, 10)
+        val (gCancel, sCancel) = sStartAgain.onCellTap(start, 10)
+        assertNull(sCancel.selectedCell)
+        assertNull(sCancel.selectedLineStartDigit)
+    }
+
     @Test fun settingsKeepHideMistakesOffByDefaultAndRoundTripIt() {
         assertFalse(AppSettings().hideMistakesUntilChecked)
         assertTrue(AppSettings().keepScreenOn)
